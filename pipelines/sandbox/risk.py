@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import time as dtime
 from typing import Any
 
-from libs.common.config import get_risk_config
+from libs.common.config import get_effective_risk_config
 from libs.common.db import get_conn
 from libs.common.schemas import AgentSignal
 
@@ -40,7 +40,7 @@ class RiskEngine:
     """Hardcoded risk controls; never delegated to an ML model."""
 
     def __init__(self, cfg: dict[str, Any] | None = None) -> None:
-        self.cfg = cfg or get_risk_config()
+        self.cfg = cfg or get_effective_risk_config()
 
     def evaluate(
         self,
@@ -63,6 +63,12 @@ class RiskEngine:
 
         if signal.direction == "FLAT":
             return RiskDecision(False, 0, "SKIP_FLAT: model did not trigger directional pick")
+
+        dir_filter = str(self.cfg.get("direction_filter", "BOTH")).upper()
+        if dir_filter == "LONG" and signal.direction != "LONG":
+            return RiskDecision(False, 0, "VETO_DIRECTION_FILTER: LONG only")
+        if dir_filter == "SHORT" and signal.direction != "SHORT":
+            return RiskDecision(False, 0, "VETO_DIRECTION_FILTER: SHORT only")
 
         cutoff_h, cutoff_m = (int(x) for x in str(self.cfg.get("entry_cutoff_ist", "11:30")).split(":"))
         if decision_time_ist > dtime(cutoff_h, cutoff_m):

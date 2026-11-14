@@ -7,8 +7,12 @@ from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import pandas as pd
+
 from libs.common.config import (
+    DATA_DIR,
     get_costs_config,
+    get_effective_risk_config,
     get_risk_config,
     get_schedule_config,
     load_all_model_configs,
@@ -408,8 +412,27 @@ def get_sandbox_payload(
     )
 
     health = get_health_payload()
-    risk_cfg = get_risk_config()
+    risk_cfg = get_effective_risk_config()
     costs_cfg = get_costs_config()
+    available_models = [
+        str(c["name"]) for c in load_all_model_configs() if c.get("name") != "regime_classifier"
+    ]
+    available_dates: list[str] = []
+    feat_path = DATA_DIR / "features" / "features_daily.parquet"
+    if feat_path.exists():
+        try:
+            fdf = pd.read_parquet(feat_path, columns=["trade_date"])
+            available_dates = sorted(
+                {pd.to_datetime(dt).date().isoformat() for dt in fdf["trade_date"].dropna()},
+                reverse=True,
+            )[:90]
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"Failed to read available_dates: {exc}")
+    if not available_dates:
+        available_dates = [
+            str(r["trade_date"])
+            for r in _rows("SELECT trade_date FROM data_quality_reports ORDER BY trade_date DESC LIMIT 90")
+        ]
 
     return {
         "risk_config": {
@@ -423,9 +446,13 @@ def get_sandbox_payload(
             "entry_cutoff_ist": risk_cfg.get("entry_cutoff_ist"),
             "square_off_ist": risk_cfg.get("square_off_ist"),
             "min_probability": risk_cfg.get("min_probability"),
-            "kill_switch": health["kill_switch"],
+            "direction_filter": risk_cfg.get("direction_filter", "BOTH"),
+            "preferred_champion": risk_cfg.get("preferred_champion", ""),
+            "kill_switch": bool(health["kill_switch"] or risk_cfg.get("kill_switch", False)),
         },
         "costs_config": costs_cfg,
+        "available_models": available_models,
+        "available_dates": available_dates,
         "model_totals": model_totals,
         "daily_summaries": daily_summaries,
         "journal": journal,

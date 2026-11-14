@@ -21,16 +21,35 @@ const PAGE_TITLES: Record<PageId, string> = {
   "cloud-billing": "Cloud Billing",
 };
 
+interface ActionBanner {
+  tone: "good" | "warn" | "bad";
+  text: string;
+}
+
 interface AppState {
   page: PageId;
   sandboxModelFilter: string;
   sandboxChampionOnly: boolean;
+  simDate: string;
+  simSlot: string;
+  lastSimulation: any;
+  actionBanner: ActionBanner | null;
+  trainTargetModel: string;
+  lastTrainResult: any;
+  busyAction: boolean;
 }
 
 const state: AppState = {
   page: "overview",
   sandboxModelFilter: "",
   sandboxChampionOnly: false,
+  simDate: "latest",
+  simSlot: "09:20",
+  lastSimulation: null,
+  actionBanner: null,
+  trainTargetModel: "all",
+  lastTrainResult: null,
+  busyAction: false,
 };
 
 function esc(val: unknown): string {
@@ -183,6 +202,33 @@ async function fetchJson(url: string): Promise<any> {
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error(`HTTP ${res.status} on ${url}`);
   return res.json();
+}
+
+async function postJson(url: string, body: Record<string, unknown> = {}): Promise<any> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  let payload: any = null;
+  try {
+    payload = await res.json();
+  } catch {
+    payload = null;
+  }
+  if (!res.ok) {
+    const detail = payload?.detail || `HTTP ${res.status} on ${url}`;
+    throw new Error(detail);
+  }
+  return payload;
+}
+
+function renderActionBanner(): string {
+  if (!state.actionBanner) return "";
+  const { tone, text } = state.actionBanner;
+  const cls = tone === "warn" || tone === "bad" ? "banner banner-warn" : "banner";
+  return `<div class="${cls}"><span>${esc(text)}</span></div>`;
 }
 
 function updateTopBadges(health: any): void {
@@ -398,6 +444,18 @@ async function renderData(): Promise<string> {
 async function renderModels(): Promise<string> {
   const d = await fetchJson("/api/models");
   const models = d.models || [];
+  const trainable = (d.configured_models || [])
+    .map((m: any) => String(m.name))
+    .filter((n: string) => n && n !== "regime_classifier");
+
+  const trainRes = state.lastTrainResult;
+  const trainResultHtml = trainRes
+    ? `<div class="sim-result-box">
+        <div class="card-title"><span>Last Training Run (${esc(trainRes.model_name || "all")})</span>${statusPill(trainRes.status)}</div>
+        <div class="muted" style="margin-bottom:8px">${esc(trainRes.summary || "")}${trainRes.duration_sec !== undefined ? ` · ${fmtNum(trainRes.duration_sec, 1)}s` : ""}</div>
+      </div>`
+    : "";
+
   const rows = models
     .map(
       (m: any) => `<tr>
@@ -426,10 +484,10 @@ async function renderModels(): Promise<string> {
         <div class="card-title"><span>${esc(m.model_name)}</span>${statusPill(m.promotion_status ?? m.status)}</div>
         ${
           entries.length
-            ? `<table><thead><tr><th>Regime</th><th class="num">Trades</th><th class="num">Win Rate</th><th class="num">Avg Return %</th></tr></thead><tbody>${entries
+            ? `<table><thead><tr><th>Regime</th><th class="num">Trades</th><th class="num">Win Rate</th><th class="num">Net PnL</th></tr></thead><tbody>${entries
                 .map(
                   ([k, v]: [string, any]) =>
-                    `<tr><td class="mono">${esc(k)}</td><td class="num">${fmtInt(v?.trades ?? v?.count ?? 0)}</td><td class="num">${fmtNum(Number(v?.win_rate ?? 0) * 100, 1)}%</td><td class="num">${fmtNum(v?.avg_ret_pct ?? v?.net_return_pct ?? 0, 2)}%</td></tr>`
+                    `<tr><td class="mono">${esc(k)}</td><td class="num">${fmtInt(v?.trades ?? 0)}</td><td class="num">${fmtNum(Number(v?.win_rate ?? 0) * 100, 1)}%</td><td class="num">${fmtNum(v?.net_pnl_inr ?? 0, 2)}</td></tr>`
                 )
                 .join("")}</tbody></table>`
             : emptyBox("No regime breakdown available.")
@@ -439,6 +497,23 @@ async function renderModels(): Promise<string> {
     .join("");
 
   return `
+    ${renderActionBanner()}
+    <div class="card control-panel">
+      <div class="card-title"><span>Walk-Forward Model Training Controls</span><span class="mono muted">Calibration + MLflow + Scorecard</span></div>
+      <div class="filter-bar">
+        <label>Target:
+          <select id="train-model-select" ${state.busyAction ? "disabled" : ""}>
+            <option value="all" ${state.trainTargetModel === "all" ? "selected" : ""}>All Enabled Models (Full Re-rank & Champion Selection)</option>
+            ${trainable.map((n: string) => `<option value="${esc(n)}" ${state.trainTargetModel === n ? "selected" : ""}>${esc(n)}</option>`).join("")}
+          </select>
+        </label>
+        <button id="btn-train-models" class="btn btn-primary" ${state.busyAction ? "disabled" : ""}>
+          ${state.busyAction ? "Training Running..." : "Train Model(s) Now"}
+        </button>
+      </div>
+      ${trainResultHtml}
+    </div>
+
     <div class="card">
       <div class="card-title">Registered Model Cards & Out-of-Sample Walk-Forward Metrics</div>
       ${
@@ -572,12 +647,128 @@ async function renderSandbox(): Promise<string> {
     .join("");
 
   const risk = d.risk_config || {};
+  const availableDates: string[] = d.available_dates || [];
+  const availableModels: string[] = d.available_models || [];
+  const latestDateLabel = availableDates[0] || "auto";
+
+  const sim = state.lastSimulation;
+  const simSignals = sim?.signals || [];
+  const simRows = simSignals
+    .map(
+      (s: any) => `<tr>
+      <td class="mono"><strong>${esc(s.symbol)}</strong></td>
+      <td>${esc(s.model_name)}${s.is_champion_trade ? ' <span class="pill pill-good">CHAMP</span>' : ""}</td>
+      <td><span class="mono">${esc(s.direction)}</span></td>
+      <td class="num">${fmtNum(s.probability, 3)}</td>
+      <td class="num">${fmtNum(s.entry_price)}</td>
+      <td class="num">${fmtNum(s.target_price)}</td>
+      <td class="num">${fmtNum(s.stop_price)}</td>
+      <td>${statusPill(s.risk_decision)}</td>
+      <td class="num">${fmtInt(s.quantity)}</td>
+      <td class="num">${fmtNum(s.fill_price)}</td>
+      <td class="num">${fmtNum(s.exit_price)}</td>
+      <td class="mono">${esc(s.exit_reason ?? "--")}</td>
+      <td class="num">${fmtNum(s.total_cost_inr)}</td>
+      <td class="num ${Number(s.net_pnl_inr) > 0 ? "pos" : Number(s.net_pnl_inr) < 0 ? "neg" : ""}">${fmtNum(s.net_pnl_inr)}</td>
+      <td class="muted">${esc((s.decision_reason || "").slice(0, 60))}</td>
+    </tr>`
+    )
+    .join("");
+
+  const simBoxHtml = sim
+    ? `<div class="sim-result-box">
+        <div class="card-title">
+          <span>Simulation Result: ${esc(sim.trade_date || "--")} (${esc(sim.slot || "09:20")} IST) · Champion ${esc(sim.champion || "--")}</span>
+          <span>Executed ${fmtInt(sim.executed_champion_trades ?? 0)} · Net ${fmtInr(sim.champion_net_pnl_inr ?? 0)}</span>
+        </div>
+        ${
+          simRows
+            ? `<div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Model</th><th>Dir</th><th class="num">Prob</th><th class="num">Entry</th><th class="num">Target</th><th class="num">Stop</th><th>Risk</th><th class="num">Qty</th><th class="num">Fill</th><th class="num">Exit</th><th>Reason</th><th class="num">Cost</th><th class="num">Net PnL</th><th>Decision Detail</th></tr></thead><tbody>${simRows}</tbody></table></div>`
+            : emptyBox("No qualifying signals passed probability threshold for the selected simulation.")
+        }
+      </div>`
+    : "";
+
   return `
+    ${renderActionBanner()}
+    <div class="card control-panel">
+      <div class="card-title"><span>Live / Selected-Date Signal & Paper-Trade Simulator</span><span class="mono muted">Uses current Paper Trading Options</span></div>
+      <div class="form-grid">
+        <label class="form-field">Trading Date (Live / Selected)
+          <select id="sim-date-select" ${state.busyAction ? "disabled" : ""}>
+            <option value="latest" ${state.simDate === "latest" ? "selected" : ""}>Live / Latest Available (${esc(latestDateLabel)})</option>
+            ${availableDates.map((dt) => `<option value="${esc(dt)}" ${state.simDate === dt ? "selected" : ""}>${esc(dt)}</option>`).join("")}
+          </select>
+        </label>
+        <label class="form-field">Snapshot Slot (IST)
+          <select id="sim-slot-select" ${state.busyAction ? "disabled" : ""}>
+            <option value="09:20" ${state.simSlot === "09:20" ? "selected" : ""}>09:20 IST (Opening + 5m Bar)</option>
+            <option value="08:45" ${state.simSlot === "08:45" ? "selected" : ""}>08:45 IST (Pre-Open Global Cues)</option>
+          </select>
+        </label>
+      </div>
+      <div class="action-row">
+        <button id="btn-simulate-date" class="btn btn-primary" ${state.busyAction ? "disabled" : ""}>Simulate Selected Date (Signals + Paper Trades)</button>
+        <button id="btn-replay-5d" class="btn" ${state.busyAction ? "disabled" : ""}>Replay Last 5 Days</button>
+        <button id="btn-replay-25d" class="btn" ${state.busyAction ? "disabled" : ""}>Replay Full 25 Days</button>
+        <button id="btn-sb-train" class="btn btn-warn" ${state.busyAction ? "disabled" : ""}>Train All Models</button>
+        <button id="btn-reset-trades" class="btn btn-danger" ${state.busyAction ? "disabled" : ""}>Reset All Paper Trades</button>
+      </div>
+      ${simBoxHtml}
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span>Paper Trading Options (Risk & Execution Config)</span><span class="mono muted">Persisted in Postgres system_state</span></div>
+      <div class="form-grid">
+        <label class="form-field">Starting Capital (INR)
+          <input id="opt-capital" type="number" min="10000" step="10000" value="${esc(risk.capital_inr ?? 1000000)}" />
+        </label>
+        <label class="form-field">Risk / Trade (%)
+          <input id="opt-risk-pct" type="number" min="0.05" max="5" step="0.05" value="${esc((Number(risk.risk_per_trade_pct ?? 0.005) * 100).toFixed(2))}" />
+        </label>
+        <label class="form-field">Max Trades / Day
+          <input id="opt-max-trades" type="number" min="1" max="50" step="1" value="${esc(risk.max_trades_per_day ?? 6)}" />
+        </label>
+        <label class="form-field">Min Probability (0.50–0.90)
+          <input id="opt-min-prob" type="number" min="0.50" max="0.90" step="0.01" value="${esc(Number(risk.min_probability ?? 0.52).toFixed(2))}" />
+        </label>
+        <label class="form-field">Max Position Cap (%)
+          <input id="opt-max-pos-pct" type="number" min="1" max="50" step="1" value="${esc((Number(risk.max_position_pct ?? 0.10) * 100).toFixed(1))}" />
+        </label>
+        <label class="form-field">Max Opening Gap (%)
+          <input id="opt-max-gap-pct" type="number" min="0.5" max="15" step="0.5" value="${esc((Number(risk.max_opening_gap_pct ?? 0.035) * 100).toFixed(1))}" />
+        </label>
+        <label class="form-field">Direction Filter
+          <select id="opt-direction">
+            <option value="BOTH" ${String(risk.direction_filter || "BOTH") === "BOTH" ? "selected" : ""}>BOTH (Long & Short)</option>
+            <option value="LONG" ${String(risk.direction_filter || "") === "LONG" ? "selected" : ""}>LONG Only</option>
+            <option value="SHORT" ${String(risk.direction_filter || "") === "SHORT" ? "selected" : ""}>SHORT Only</option>
+          </select>
+        </label>
+        <label class="form-field">Active Model Override
+          <select id="opt-champion">
+            <option value="" ${!risk.preferred_champion ? "selected" : ""}>Auto (Top Ranked Champion)</option>
+            ${availableModels.map((m) => `<option value="${esc(m)}" ${risk.preferred_champion === m ? "selected" : ""}>${esc(m)}</option>`).join("")}
+          </select>
+        </label>
+        <label class="form-field">Kill Switch
+          <select id="opt-kill-switch">
+            <option value="false" ${!risk.kill_switch ? "selected" : ""}>OFF (Paper Trading Enabled)</option>
+            <option value="true" ${risk.kill_switch ? "selected" : ""}>ON (Halt All Paper Trades)</option>
+          </select>
+        </label>
+      </div>
+      <div class="action-row">
+        <button id="btn-save-options" class="btn btn-primary" ${state.busyAction ? "disabled" : ""}>Save Paper Trading Options</button>
+        <button id="btn-reset-options" class="btn" ${state.busyAction ? "disabled" : ""}>Reset Defaults</button>
+      </div>
+    </div>
+
     <div class="kpi-grid">
       <div class="card"><div class="card-title">Paper Capital</div><div class="kpi-val">${fmtInr(risk.capital_inr)}</div><div class="kpi-sub">Max daily loss ${fmtNum(Number(risk.max_daily_loss_pct ?? 0) * 100, 1)}%</div></div>
-      <div class="card"><div class="card-title">Position & Sector Caps</div><div class="kpi-val">${fmtNum(Number(risk.max_position_pct ?? 0) * 100, 0)}% / ${fmtNum(Number(risk.max_sector_pct ?? 0) * 100, 0)}%</div><div class="kpi-sub">Risk/trade ${fmtNum(Number(risk.risk_per_trade_pct ?? 0) * 100, 2)}%</div></div>
-      <div class="card"><div class="card-title">Session Windows (IST)</div><div class="kpi-val">${esc(risk.entry_cutoff_ist)} / ${esc(risk.square_off_ist)}</div><div class="kpi-sub">Max ${fmtInt(risk.max_trades_per_day)} trades/day</div></div>
-      <div class="card"><div class="card-title">LLM Reviewer Stub</div><div class="kpi-val">APPROVE</div><div class="kpi-sub">No LLM connected in Phase 1</div></div>
+      <div class="card"><div class="card-title">Position & Sector Caps</div><div class="kpi-val">${fmtNum(Number(risk.max_position_pct ?? 0) * 100, 0)}% / ${fmtNum(Number(risk.max_sector_pct ?? 0) * 100, 0)}%</div><div class="kpi-sub">Risk/trade ${fmtNum(Number(risk.risk_per_trade_pct ?? 0) * 100, 2)}% · Min prob ${fmtNum(risk.min_probability, 2)}</div></div>
+      <div class="card"><div class="card-title">Session Windows (IST)</div><div class="kpi-val">${esc(risk.entry_cutoff_ist)} / ${esc(risk.square_off_ist)}</div><div class="kpi-sub">Max ${fmtInt(risk.max_trades_per_day)} trades/day · ${esc(risk.direction_filter || "BOTH")}</div></div>
+      <div class="card"><div class="card-title">LLM Reviewer Stub</div><div class="kpi-val">APPROVE</div><div class="kpi-sub">${esc(risk.preferred_champion ? "Override: " + risk.preferred_champion : "Champion: Auto")}</div></div>
     </div>
 
     <div class="card">
@@ -805,8 +996,157 @@ async function loadPage(page: PageId): Promise<void> {
         break;
     }
     content.innerHTML = html;
+    void fetchJson("/api/health").then(updateTopBadges).catch(() => {});
+
+    if (page === "models") {
+      document.getElementById("train-model-select")?.addEventListener("change", (ev) => {
+        state.trainTargetModel = (ev.target as HTMLSelectElement).value;
+      });
+      document.getElementById("btn-train-models")?.addEventListener("click", async () => {
+        state.busyAction = true;
+        state.actionBanner = { tone: "warn", text: `Running walk-forward training for '${state.trainTargetModel}'...` };
+        void loadPage("models");
+        try {
+          const res = await postJson("/api/actions/train", { model_name: state.trainTargetModel });
+          state.lastTrainResult = res;
+          state.actionBanner = { tone: "good", text: res.summary || `Completed training for ${state.trainTargetModel}.` };
+        } catch (err) {
+          state.actionBanner = { tone: "bad", text: `Training failed: ${(err as Error).message}` };
+        } finally {
+          state.busyAction = false;
+          void loadPage("models");
+        }
+      });
+    }
 
     if (page === "sandbox") {
+      document.getElementById("sim-date-select")?.addEventListener("change", (ev) => {
+        state.simDate = (ev.target as HTMLSelectElement).value;
+      });
+      document.getElementById("sim-slot-select")?.addEventListener("change", (ev) => {
+        state.simSlot = (ev.target as HTMLSelectElement).value;
+      });
+
+      document.getElementById("btn-save-options")?.addEventListener("click", async () => {
+        const val = (id: string): string => (document.getElementById(id) as HTMLInputElement | HTMLSelectElement | null)?.value ?? "";
+        const body = {
+          capital_inr: Number(val("opt-capital") || 1000000),
+          risk_per_trade_pct: Number(val("opt-risk-pct") || 0.5) / 100,
+          max_trades_per_day: Number(val("opt-max-trades") || 6),
+          min_probability: Number(val("opt-min-prob") || 0.52),
+          max_position_pct: Number(val("opt-max-pos-pct") || 10) / 100,
+          max_opening_gap_pct: Number(val("opt-max-gap-pct") || 3.5) / 100,
+          direction_filter: val("opt-direction") || "BOTH",
+          preferred_champion: val("opt-champion") || "",
+          kill_switch: val("opt-kill-switch") === "true",
+        };
+        state.busyAction = true;
+        try {
+          const res = await postJson("/api/actions/paper-options", body);
+          state.actionBanner = { tone: "good", text: `Saved paper trading options: ${res.summary || "updated"}` };
+        } catch (err) {
+          state.actionBanner = { tone: "bad", text: `Failed to save options: ${(err as Error).message}` };
+        } finally {
+          state.busyAction = false;
+          void loadPage("sandbox");
+        }
+      });
+
+      document.getElementById("btn-reset-options")?.addEventListener("click", async () => {
+        state.busyAction = true;
+        try {
+          await postJson("/api/actions/paper-options", { reset_defaults: true });
+          state.actionBanner = { tone: "good", text: "Paper trading options reset to config/risk.yaml defaults." };
+        } catch (err) {
+          state.actionBanner = { tone: "bad", text: `Failed to reset options: ${(err as Error).message}` };
+        } finally {
+          state.busyAction = false;
+          void loadPage("sandbox");
+        }
+      });
+
+      document.getElementById("btn-simulate-date")?.addEventListener("click", async () => {
+        state.busyAction = true;
+        state.actionBanner = { tone: "warn", text: `Simulating live/selected date (${state.simDate}, slot ${state.simSlot})...` };
+        void loadPage("sandbox");
+        try {
+          const res = await postJson("/api/actions/simulate", {
+            mode: state.simDate === "latest" ? "live" : "single_date",
+            trade_date: state.simDate,
+            slot: state.simSlot,
+          });
+          state.lastSimulation = res;
+          state.actionBanner = {
+            tone: "good",
+            text: `Simulated ${res.trade_date} (${res.slot} IST) with ${res.champion}: ${res.executed_champion_trades} executed trades, Net ${fmtInr(res.champion_net_pnl_inr)}.`,
+          };
+        } catch (err) {
+          state.actionBanner = { tone: "bad", text: `Simulation failed: ${(err as Error).message}` };
+        } finally {
+          state.busyAction = false;
+          void loadPage("sandbox");
+        }
+      });
+
+      const runMultiReplay = async (days: number): Promise<void> => {
+        state.busyAction = true;
+        state.actionBanner = { tone: "warn", text: `Replaying last ${days} trading sessions with active paper-trading options...` };
+        void loadPage("sandbox");
+        try {
+          const res = await postJson("/api/actions/simulate", {
+            mode: "replay_range",
+            days,
+            slot: state.simSlot,
+          });
+          state.lastSimulation = res;
+          state.actionBanner = {
+            tone: "good",
+            text: `Replayed ${res.days_simulated} days (${res.start_date} to ${res.end_date}): ${res.executed_champion_trades} champion trades, Net ${fmtInr(res.champion_net_pnl_inr)}.`,
+          };
+        } catch (err) {
+          state.actionBanner = { tone: "bad", text: `Replay failed: ${(err as Error).message}` };
+        } finally {
+          state.busyAction = false;
+          void loadPage("sandbox");
+        }
+      };
+
+      document.getElementById("btn-replay-5d")?.addEventListener("click", () => void runMultiReplay(5));
+      document.getElementById("btn-replay-25d")?.addEventListener("click", () => void runMultiReplay(25));
+
+      document.getElementById("btn-sb-train")?.addEventListener("click", async () => {
+        state.busyAction = true;
+        state.actionBanner = { tone: "warn", text: "Training all models (walk-forward + calibration + scorecard)..." };
+        void loadPage("sandbox");
+        try {
+          const res = await postJson("/api/actions/train", { model_name: "all" });
+          state.lastTrainResult = res;
+          state.actionBanner = { tone: "good", text: res.summary || "Model training completed." };
+        } catch (err) {
+          state.actionBanner = { tone: "bad", text: `Training failed: ${(err as Error).message}` };
+        } finally {
+          state.busyAction = false;
+          void loadPage("sandbox");
+        }
+      });
+
+      document.getElementById("btn-reset-trades")?.addEventListener("click", async () => {
+        state.busyAction = true;
+        try {
+          const res = await postJson("/api/actions/reset-trades", {});
+          state.lastSimulation = null;
+          state.actionBanner = {
+            tone: "good",
+            text: `Reset complete: cleared ${fmtInt(res.deleted_journal_rows)} journal rows & ${fmtInt(res.deleted_summary_rows)} daily summaries (capital ${fmtInr(res.capital_inr)}).`,
+          };
+        } catch (err) {
+          state.actionBanner = { tone: "bad", text: `Reset failed: ${(err as Error).message}` };
+        } finally {
+          state.busyAction = false;
+          void loadPage("sandbox");
+        }
+      });
+
       document.getElementById("sb-model-filter")?.addEventListener("change", (ev) => {
         state.sandboxModelFilter = (ev.target as HTMLSelectElement).value;
         void loadPage("sandbox");

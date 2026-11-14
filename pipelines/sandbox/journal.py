@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from libs.common.config import DATA_DIR, get_risk_config
-from libs.common.db import get_conn
+from libs.common.config import DATA_DIR, get_effective_risk_config
+from libs.common.db import get_conn, init_schema
 from libs.common.logging import get_logger
 from libs.common.storage import upload_file_to_gcs
 
+IST = ZoneInfo("Asia/Kolkata")
 log = get_logger("finch.sandbox.journal")
 
 
@@ -82,11 +84,20 @@ def save_journal_records(records: list[dict[str, Any]], trade_date: date) -> Pat
     return out_path
 
 
-def save_daily_summaries(records: list[dict[str, Any]], trade_date: date, tradeable: bool) -> None:
+def save_daily_summaries(
+    records: list[dict[str, Any]],
+    trade_date: date,
+    tradeable: bool,
+    capital_inr: float | None = None,
+) -> None:
     """Aggregate per-model daily P/L and equity curve deterministically."""
     if not records:
         return
-    capital = float(get_risk_config().get("capital_inr", 1_000_000.0))
+    capital = (
+        float(capital_inr)
+        if capital_inr is not None
+        else float(get_effective_risk_config().get("capital_inr", 1_000_000.0))
+    )
     df = pd.DataFrame(records)
     try:
         with get_conn() as conn, conn.cursor() as cur:
@@ -144,3 +155,54 @@ def save_daily_summaries(records: list[dict[str, Any]], trade_date: date, tradea
                 )
     except Exception as exc:  # noqa: BLE001
         log.warning(f"DB persist skipped for sandbox_daily_summary: {exc}")
+
+
+def reset_sandbox_trades() -> dict[str, Any]:
+    """Delete all simulated paper-trading journal & summary rows and reset equity state."""
+    init_schema()
+    started = datetime.now(IST)
+    capital = float(get_effective_risk_config().get("capital_inr", 1_000_000.0))
+    deleted_journal = 0
+    deleted_summary = 0
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM sandbox_journal")
+        deleted_journal = max(0, int(cur.rowcount or 0))
+        cur.execute("DELETE FROM sandbox_daily_summary")
+        deleted_summary = max(0, int(cur.rowcount or 0))
+
+    deleted_files = 0
+    journal_dir = DATA_DIR / "journal"
+    if journal_dir.exists():
+        for p in journal_dir.glob("journal_*.parquet"):
+            try:
+                p.unlink()
+                deleted_files += 1
+            except OSError as exc:  # noqa: BLE001
+                log.warning(f"Could not delete journal file {p}: {exc}")
+
+    finished = datetime.now(IST)
+    summary = (
+        f"reset_sandbox: deleted_journal={deleted_journal}, "
+        f"deleted_summary={deleted_summary}, deleted_files={deleted_files}, capital_inr={capital:.2f}"
+    )
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO job_runs (job_name, started_at_ist, finished_at_ist, duration_sec, status, summary)
+                VALUES ('sandbox_reset', %s, %s, %s, 'success', %s)
+                """,
+                (started, finished, round((finished - started).total_seconds(), 2), summary),
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"Job run record skipped for sandbox_reset: {exc}")
+
+    log.info(summary)
+    return {
+        "deleted_journal_rows": deleted_journal,
+        "deleted_summary_rows": deleted_summary,
+        "deleted_parquet_files": deleted_files,
+        "capital_inr": capital,
+        "summary": summary,
+    }

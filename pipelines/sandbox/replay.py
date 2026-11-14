@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from libs.common.config import DATA_DIR, get_risk_config, load_all_model_configs
+from libs.common.config import DATA_DIR, get_effective_risk_config, load_all_model_configs
 from libs.common.db import get_conn, init_schema
 from libs.common.logging import get_logger
 from pipelines.data.quality import is_day_tradeable
@@ -26,8 +26,8 @@ IST = ZoneInfo("Asia/Kolkata")
 log = get_logger("finch.sandbox.replay")
 
 
-def _load_active_models() -> tuple[str, list[dict[str, Any]]]:
-    """Load champion + shadow models from registry/artifacts."""
+def _load_active_models(preferred_champion: str | None = None) -> tuple[str, list[dict[str, Any]]]:
+    """Load champion + shadow models from registry/artifacts, honoring preferred champion override."""
     champion = ""
     statuses: dict[str, str] = {}
     try:
@@ -40,25 +40,29 @@ def _load_active_models() -> tuple[str, list[dict[str, Any]]]:
     except Exception as exc:  # noqa: BLE001
         log.warning(f"Registry lookup fallback to local configs: {exc}")
 
+    pref = (preferred_champion or "").strip()
     bundles: list[dict[str, Any]] = []
     for cfg in load_all_model_configs():
         name = cfg["name"]
         if name == "regime_classifier":
             continue
         status = statuses.get(name, "shadow")
-        if status not in ("champion", "shadow"):
+        if status not in ("champion", "shadow") and name != pref:
             continue
         art = load_model_artifact(name)
         if art is not None:
-            art["status"] = status
+            art["status"] = "champion" if name == pref else status
             bundles.append(art)
 
-    if not champion and bundles:
+    available_names = {b["model_name"] for b in bundles}
+    if pref and pref in available_names:
+        champion = pref
+    elif not champion and bundles:
         champion = bundles[0]["model_name"]
     return champion, bundles
 
 
-def _run_model_inference(bundle: dict[str, Any], snap_df: pd.DataFrame):
+def _run_model_inference(bundle: dict[str, Any], snap_df: pd.DataFrame, min_prob: float):
     agent = get_agent_for_name(str(bundle.get("agent", "momentum")))
     return agent.predict_signals(
         snapshot_df=snap_df,
@@ -66,40 +70,50 @@ def _run_model_inference(bundle: dict[str, Any], snap_df: pd.DataFrame):
         model_name=bundle["model_name"],
         model_version=str(bundle.get("dataset_version", "v1")),
         features=bundle["features"],
-        min_prob=float(get_risk_config().get("min_probability", 0.52)),
+        min_prob=min_prob,
     )
 
 
-def replay_date(trade_date: date, slot: str = "09:20", max_candidates_per_model: int = 12) -> dict[str, Any]:
+def replay_date(
+    trade_date: date,
+    slot: str = "09:20",
+    max_candidates_per_model: int = 12,
+    risk_overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Deterministically simulate one trading day across champion + shadow models."""
     init_schema()
     started = datetime.now(IST)
     tradeable, reasons = is_day_tradeable(trade_date)
+
+    risk_cfg = get_effective_risk_config()
+    if risk_overrides:
+        risk_cfg.update({k: v for k, v in risk_overrides.items() if v is not None})
 
     snap_path = freeze_snapshot_for_date(trade_date, slot=slot)
     snap_df = pd.read_parquet(snap_path)
     bar_by_isin = {str(r["isin"]): r for _, r in snap_df.iterrows()}
     dataset_version = str(snap_df["dataset_version"].iloc[0]) if "dataset_version" in snap_df.columns else "unknown"
 
-    champion_name, bundles = _load_active_models()
+    preferred_champ = str(risk_cfg.get("preferred_champion") or "")
+    champion_name, bundles = _load_active_models(preferred_champion=preferred_champ)
     reviewer = StubLLMReviewer()
     broker = PaperBroker()
-    risk_cfg = get_risk_config()
+    min_prob = float(risk_cfg.get("min_probability", 0.52))
 
     # Run all champion & shadow models in parallel on the frozen snapshot
     signals_by_model: dict[str, list] = {}
     with ThreadPoolExecutor(max_workers=4) as pool:
-        futs = {b["model_name"]: pool.submit(_run_model_inference, b, snap_df) for b in bundles}
+        futs = {b["model_name"]: pool.submit(_run_model_inference, b, snap_df, min_prob) for b in bundles}
         for name, fut in futs.items():
             signals_by_model[name] = fut.result()
 
     # Coordinator combines picks across all active models
     all_signals = [s for sigs in signals_by_model.values() for s in sigs]
-    coordinated = coordinate_signals(all_signals, min_prob=float(risk_cfg.get("min_probability", 0.52)))
+    coordinated = coordinate_signals(all_signals, min_prob=min_prob)
     coord_by_isin = {c.signal.isin: c for c in coordinated}
 
     records: list[dict[str, Any]] = []
-    decision_time = dtime(9, 20)
+    decision_time = dtime(8, 45) if slot == "08:45" else dtime(9, 20)
 
     for bundle in bundles:
         mname = bundle["model_name"]
@@ -236,14 +250,19 @@ def replay_date(trade_date: date, slot: str = "09:20", max_candidates_per_model:
                 )
 
     save_journal_records(records, trade_date)
-    save_daily_summaries(records, trade_date, tradeable=tradeable)
+    save_daily_summaries(
+        records,
+        trade_date,
+        tradeable=tradeable,
+        capital_inr=float(risk_cfg.get("capital_inr", 1_000_000.0)),
+    )
 
     finished = datetime.now(IST)
     champ_recs = [r for r in records if r["is_champion_trade"]]
     champ_exec = sum(1 for r in champ_recs if r["quantity"] > 0)
     champ_pnl = round(sum(r["net_pnl_inr"] for r in champ_recs), 2)
     summary = (
-        f"date={trade_date}, champion={champion_name}, exec={champ_exec}, "
+        f"date={trade_date}, slot={slot}, champion={champion_name}, exec={champ_exec}, "
         f"net_pnl_inr={champ_pnl}, total_records={len(records)}"
     )
     try:
@@ -259,13 +278,53 @@ def replay_date(trade_date: date, slot: str = "09:20", max_candidates_per_model:
         log.warning(f"Job run record skipped: {exc}")
 
     log.info(f"Replay complete: {summary}")
+    display_recs = sorted(
+        champ_recs if champ_recs else records,
+        key=lambda r: (-int(r["quantity"] > 0), -float(r["probability"])),
+    )
+    signals_out = [
+        {
+            "trade_date": str(r["trade_date"]),
+            "snapshot_slot": r["snapshot_slot"],
+            "model_name": r["model_name"],
+            "symbol": r["symbol"],
+            "sector": r["sector"],
+            "direction": r["direction"],
+            "probability": round(float(r["probability"]), 4),
+            "entry_price": round(float(r["entry_price"]), 2),
+            "target_price": round(float(r["target_price"]), 2),
+            "stop_price": round(float(r["stop_price"]), 2),
+            "coordinator_decision": r["coordinator_decision"],
+            "llm_decision": r["llm_decision"],
+            "risk_decision": r["risk_decision"],
+            "decision_reason": r["decision_reason"],
+            "is_champion_trade": bool(r["is_champion_trade"]),
+            "quantity": int(r["quantity"]),
+            "fill_price": round(float(r["fill_price"]), 2) if r["fill_price"] is not None else None,
+            "exit_price": round(float(r["exit_price"]), 2) if r["exit_price"] is not None else None,
+            "exit_reason": r["exit_reason"],
+            "slippage_inr": round(float(r["slippage_inr"]), 2),
+            "total_cost_inr": round(float(r["total_cost_inr"]), 2),
+            "gross_pnl_inr": round(float(r["gross_pnl_inr"]), 2),
+            "net_pnl_inr": round(float(r["net_pnl_inr"]), 2),
+            "counterfactual_pnl_inr": (
+                round(float(r["counterfactual_pnl_inr"]), 2)
+                if r["counterfactual_pnl_inr"] is not None
+                else None
+            ),
+        }
+        for r in display_recs[:24]
+    ]
     return {
         "trade_date": trade_date.isoformat(),
+        "slot": slot,
         "tradeable": tradeable,
+        "reasons": reasons,
         "champion": champion_name,
         "executed_champion_trades": champ_exec,
         "champion_net_pnl_inr": champ_pnl,
         "total_journal_records": len(records),
+        "signals": signals_out,
     }
 
 

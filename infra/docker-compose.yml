@@ -125,7 +125,7 @@ services:
         condition: service_healthy
     environment: *common_env
     volumes:
-      - finch_data:/var/lib/finch/data:ro
+      - finch_data:/var/lib/finch/data
 
   nginx:
     image: nginx:1.27.3-alpine

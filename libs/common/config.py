@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -35,6 +36,32 @@ def get_costs_config() -> dict[str, Any]:
 @lru_cache(maxsize=1)
 def get_risk_config() -> dict[str, Any]:
     return load_yaml(CONFIG_DIR / "risk.yaml")
+
+
+def get_effective_risk_config() -> dict[str, Any]:
+    """Return baseline YAML risk config merged with runtime paper-trading options from Postgres."""
+    merged: dict[str, Any] = dict(get_risk_config())
+    merged.setdefault("direction_filter", "BOTH")
+    merged.setdefault("preferred_champion", "")
+    merged.setdefault("kill_switch", False)
+    try:
+        from libs.common.db import get_conn  # local import prevents circular dependency
+
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT key, value FROM system_state WHERE key IN ('paper_trading_options', 'kill_switch')"
+            )
+            rows = {str(r["key"]): str(r["value"]) for r in cur.fetchall()}
+        raw_opts = rows.get("paper_trading_options")
+        if raw_opts:
+            parsed = json.loads(raw_opts)
+            if isinstance(parsed, dict):
+                merged.update({k: v for k, v in parsed.items() if v is not None})
+        if "kill_switch" in rows:
+            merged["kill_switch"] = rows["kill_switch"].lower() in ("true", "1", "on")
+    except Exception:  # noqa: BLE001
+        pass
+    return merged
 
 
 @lru_cache(maxsize=1)
