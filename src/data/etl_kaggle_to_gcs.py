@@ -3,6 +3,7 @@
 import os
 import subprocess
 import duckdb
+import kagglehub
 
 BUCKET = os.getenv("FINCH_BUCKET", "gs://finch-514709-lake")
 KAGGLE_DATASET = "nikhilkop/nse-750-clean-1min"
@@ -10,12 +11,14 @@ LOCAL_DIR = "/tmp/finch_kaggle"
 
 
 def download_kaggle() -> str:
-    """Download Kaggle dataset to local scratch (run inside Google Colab)."""
+    """Download Kaggle dataset via kagglehub and symlink into LOCAL_DIR (zero extra disk)."""
     os.makedirs(LOCAL_DIR, exist_ok=True)
-    subprocess.run(
-        ["kaggle", "datasets", "download", "-d", KAGGLE_DATASET, "-p", LOCAL_DIR, "--unzip"],
-        check=True,
-    )
+    cached_path = kagglehub.dataset_download(KAGGLE_DATASET)
+    for name in os.listdir(cached_path):
+        src = os.path.join(cached_path, name)
+        dst = os.path.join(LOCAL_DIR, name)
+        if not os.path.exists(dst):
+            os.symlink(src, dst)
     return LOCAL_DIR
 
 
