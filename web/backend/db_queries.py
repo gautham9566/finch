@@ -287,9 +287,40 @@ def get_models_payload() -> dict[str, Any]:
         for c in load_all_model_configs()
     ]
 
+    date_bounds: dict[str, str | None] = {"min_date": None, "max_date": None}
+    feat_path = DATA_DIR / "features" / "features_daily.parquet"
+    if feat_path.exists():
+        try:
+            date_df = pd.read_parquet(feat_path, columns=["trade_date"])
+            if not date_df.empty and "trade_date" in date_df.columns:
+                parsed_dates = pd.to_datetime(date_df["trade_date"], errors="coerce").dropna().dt.date
+                if not parsed_dates.empty:
+                    date_bounds = {
+                        "min_date": parsed_dates.min().isoformat(),
+                        "max_date": parsed_dates.max().isoformat(),
+                    }
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"Failed to read date bounds from features_daily.parquet: {exc}")
+
+    if date_bounds["min_date"] is None or date_bounds["max_date"] is None:
+        try:
+            with get_conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT MIN(date_start) AS min_date, MAX(date_end) AS max_date FROM dataset_versions"
+                )
+                row = cur.fetchone()
+                if row:
+                    date_bounds = {
+                        "min_date": _serialize(row.get("min_date")),
+                        "max_date": _serialize(row.get("max_date")),
+                    }
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"Failed to read date bounds from dataset_versions: {exc}")
+
     return {
         "models": registered,
         "configured_models": configured,
+        "date_bounds": date_bounds,
     }
 
 

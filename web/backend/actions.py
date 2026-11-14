@@ -21,7 +21,7 @@ from libs.common.db import get_conn, init_schema
 from libs.common.logging import get_logger
 from pipelines.sandbox.journal import reset_sandbox_trades
 from pipelines.sandbox.replay import replay_date
-from pipelines.training.cli import train_all, train_single_model
+from pipelines.training.cli import filter_training_dataframe, train_all, train_single_model
 from pipelines.training.registry import get_git_commit, persist_registry_and_scorecard
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -305,20 +305,61 @@ def _compact_scorecard(sc: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _execute_training(target_model: str) -> dict[str, Any]:
+def _parse_training_date_range(payload: dict[str, Any]) -> tuple[date | None, date | None]:
+    """Validate optional start_date/end_date ISO date strings for training."""
+    raw_start = str(payload.get("start_date") or "").strip()
+    raw_end = str(payload.get("end_date") or "").strip()
+    if not raw_start and not raw_end:
+        return None, None
+    if not raw_start or not raw_end:
+        raise HTTPException(
+            status_code=400,
+            detail="Both start_date and end_date must be provided together (YYYY-MM-DD).",
+        )
+    try:
+        start_d = date.fromisoformat(raw_start)
+        end_d = date.fromisoformat(raw_end)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid training date format. Expected YYYY-MM-DD: {exc}",
+        ) from exc
+    if start_d > end_d:
+        raise HTTPException(
+            status_code=400,
+            detail=f"start_date ({raw_start}) must be on or before end_date ({raw_end}).",
+        )
+    return start_d, end_d
+
+
+def _execute_training(
+    target_model: str,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> dict[str, Any]:
     started = datetime.now(IST)
     feat_path = DATA_DIR / "features" / "features_daily.parquet"
     if not feat_path.exists():
         raise FileNotFoundError("Feature dataset not found. Run Pipeline 1 (data eod) first.")
 
+    start_iso = start_date.isoformat() if start_date else None
+    end_iso = end_date.isoformat() if end_date else None
+
     if target_model == "all":
-        ranked = train_all(allow_market_hours=True)
+        ranked = train_all(
+            allow_market_hours=True,
+            start_date=start_date,
+            end_date=end_date,
+        )
         champ = next((s["model_name"] for s in ranked if s.get("promotion_status") == "champion"), "none")
         finished = datetime.now(IST)
-        summary = f"Trained all {len(ranked)} models; champion={champ}"
+        window_note = f" [{start_iso}..{end_iso}]" if start_iso and end_iso else ""
+        summary = f"Trained all {len(ranked)} models{window_note}; champion={champ}"
         return {
             "status": "completed",
             "model_name": "all",
+            "start_date": start_iso,
+            "end_date": end_iso,
             "started_at_ist": started.isoformat(),
             "finished_at_ist": finished.isoformat(),
             "duration_sec": round((finished - started).total_seconds(), 2),
@@ -333,7 +374,7 @@ def _execute_training(target_model: str) -> dict[str, Any]:
 
     init_schema()
     df = pd.read_parquet(feat_path)
-    dataset_version = str(df["dataset_version"].iloc[0]) if "dataset_version" in df.columns else "unknown"
+    df, dataset_version = filter_training_dataframe(df, start_date=start_date, end_date=end_date)
     git_commit = get_git_commit()
     res = train_single_model(configs[target_model], df, dataset_version, git_commit)
     sc = res["scorecard"]
@@ -360,8 +401,9 @@ def _execute_training(target_model: str) -> dict[str, Any]:
 
     finished = datetime.now(IST)
     duration = round((finished - started).total_seconds(), 2)
+    window_note = f" [{start_iso}..{end_iso}]" if start_iso and end_iso else ""
     summary = (
-        f"model={target_model}, status={prev_status}, test_auc={sc['test_auc']:.3f}, "
+        f"model={target_model}{window_note}, status={prev_status}, test_auc={sc['test_auc']:.3f}, "
         f"net_ret={sc['net_return_pct']:+.2f}%"
     )
     try:
@@ -379,6 +421,8 @@ def _execute_training(target_model: str) -> dict[str, Any]:
     return {
         "status": "completed",
         "model_name": target_model,
+        "start_date": start_iso,
+        "end_date": end_iso,
         "started_at_ist": started.isoformat(),
         "finished_at_ist": finished.isoformat(),
         "duration_sec": duration,
@@ -398,6 +442,7 @@ def trigger_model_training(payload: dict[str, Any]) -> dict[str, Any]:
     global _TRAIN_STATE
     target_model = str(payload.get("model_name") or "all").strip()
     async_mode = bool(payload.get("async_mode", False))
+    start_date, end_date = _parse_training_date_range(payload)
 
     if target_model != "all" and target_model not in set(list_available_models()):
         raise HTTPException(
@@ -411,10 +456,15 @@ def trigger_model_training(payload: dict[str, Any]) -> dict[str, Any]:
             "already_running": True,
         }
 
+    start_iso = start_date.isoformat() if start_date else None
+    end_iso = end_date.isoformat() if end_date else None
+
     started = datetime.now(IST)
     _TRAIN_STATE = {
         "status": "running",
         "model_name": target_model,
+        "start_date": start_iso,
+        "end_date": end_iso,
         "started_at_ist": started.isoformat(),
         "finished_at_ist": None,
         "duration_sec": None,
@@ -426,7 +476,7 @@ def trigger_model_training(payload: dict[str, Any]) -> dict[str, Any]:
     def _run_and_release() -> dict[str, Any]:
         global _TRAIN_STATE
         try:
-            outcome = _execute_training(target_model)
+            outcome = _execute_training(target_model, start_date=start_date, end_date=end_date)
             _TRAIN_STATE = outcome
             return outcome
         except Exception as exc:  # noqa: BLE001
@@ -435,6 +485,8 @@ def trigger_model_training(payload: dict[str, Any]) -> dict[str, Any]:
             _TRAIN_STATE = {
                 "status": "failed",
                 "model_name": target_model,
+                "start_date": start_iso,
+                "end_date": end_iso,
                 "started_at_ist": started.isoformat(),
                 "finished_at_ist": finished.isoformat(),
                 "duration_sec": round((finished - started).total_seconds(), 2),
@@ -459,7 +511,7 @@ def trigger_model_training(payload: dict[str, Any]) -> dict[str, Any]:
 
     try:
         return _run_and_release()
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Training failed: {exc}") from exc

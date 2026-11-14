@@ -32,9 +32,15 @@ interface AppState {
   sandboxChampionOnly: boolean;
   simDate: string;
   simSlot: string;
+  simPresetFilter: string;
+  simModelFilter: string;
+  simSymbolFilter: string;
+  simSortBy: string;
   lastSimulation: any;
   actionBanner: ActionBanner | null;
   trainTargetModel: string;
+  trainStartDate: string;
+  trainEndDate: string;
   lastTrainResult: any;
   busyAction: boolean;
 }
@@ -43,11 +49,17 @@ const state: AppState = {
   page: "overview",
   sandboxModelFilter: "",
   sandboxChampionOnly: false,
-  simDate: "latest",
+  simDate: "",
   simSlot: "09:20",
+  simPresetFilter: "all",
+  simModelFilter: "",
+  simSymbolFilter: "",
+  simSortBy: "pnl_desc",
   lastSimulation: null,
   actionBanner: null,
   trainTargetModel: "all",
+  trainStartDate: "",
+  trainEndDate: "",
   lastTrainResult: null,
   busyAction: false,
 };
@@ -441,11 +453,38 @@ async function renderData(): Promise<string> {
   `;
 }
 
+function isTrainReady(): boolean {
+  return Boolean(
+    !state.busyAction &&
+      state.trainStartDate &&
+      state.trainEndDate &&
+      state.trainStartDate <= state.trainEndDate
+  );
+}
+
+function syncTrainButtonState(): void {
+  const btn = document.getElementById("btn-train-models") as HTMLButtonElement | null;
+  if (btn) btn.disabled = !isTrainReady();
+  const hint = document.getElementById("train-date-hint");
+  if (hint) {
+    if (!state.trainStartDate || !state.trainEndDate) {
+      hint.textContent = "Select both Start Date and End Date to enable training.";
+    } else if (state.trainStartDate > state.trainEndDate) {
+      hint.textContent = "Start Date must be on or before End Date.";
+    } else {
+      hint.textContent = `Window: ${state.trainStartDate} to ${state.trainEndDate}`;
+    }
+  }
+}
+
 async function renderModels(): Promise<string> {
   const d = await fetchJson("/api/models");
   const models = d.models || [];
+  const dateBounds = d.date_bounds || {};
+  const minDateAttr = dateBounds.min_date ? `min="${esc(dateBounds.min_date)}"` : "";
+  const maxDateAttr = dateBounds.max_date ? `max="${esc(dateBounds.max_date)}"` : "";
   const trainable = (d.configured_models || [])
-    .map((m: any) => String(m.name))
+    .map((m: any) => String(m.model_name ?? m.name ?? ""))
     .filter((n: string) => n && n !== "regime_classifier");
 
   const trainRes = state.lastTrainResult;
@@ -507,9 +546,24 @@ async function renderModels(): Promise<string> {
             ${trainable.map((n: string) => `<option value="${esc(n)}" ${state.trainTargetModel === n ? "selected" : ""}>${esc(n)}</option>`).join("")}
           </select>
         </label>
-        <button id="btn-train-models" class="btn btn-primary" ${state.busyAction ? "disabled" : ""}>
+        <label>Start Date:
+          <input id="train-start-date" type="date" value="${esc(state.trainStartDate)}" ${minDateAttr} ${maxDateAttr} ${state.busyAction ? "disabled" : ""} />
+        </label>
+        <label>End Date:
+          <input id="train-end-date" type="date" value="${esc(state.trainEndDate)}" ${minDateAttr} ${maxDateAttr} ${state.busyAction ? "disabled" : ""} />
+        </label>
+        <button id="btn-train-models" class="btn btn-primary" ${isTrainReady() ? "" : "disabled"}>
           ${state.busyAction ? "Training Running..." : "Train Model(s) Now"}
         </button>
+      </div>
+      <div id="train-date-hint" class="muted" style="margin-top:6px">
+        ${
+          !state.trainStartDate || !state.trainEndDate
+            ? "Select both Start Date and End Date to enable training."
+            : state.trainStartDate > state.trainEndDate
+              ? "Start Date must be on or before End Date."
+              : `Window: ${esc(state.trainStartDate)} to ${esc(state.trainEndDate)}`
+        }${dateBounds.min_date && dateBounds.max_date ? ` · Available data: ${esc(dateBounds.min_date)} to ${esc(dateBounds.max_date)}` : ""}
       </div>
       ${trainResultHtml}
     </div>
@@ -594,6 +648,101 @@ async function renderRankings(): Promise<string> {
   `;
 }
 
+function simEffectivePnl(s: any): number {
+  if (s.effective_pnl_inr !== undefined && s.effective_pnl_inr !== null) {
+    return Number(s.effective_pnl_inr);
+  }
+  return Number(s.quantity) > 0
+    ? Number(s.net_pnl_inr ?? 0)
+    : Number(s.counterfactual_pnl_inr ?? 0);
+}
+
+function filterAndSortSimSignals(rawSignals: any[]): any[] {
+  const symQuery = (state.simSymbolFilter || "").trim().toUpperCase();
+  let rows = (rawSignals || []).filter((s) => {
+    if (state.simModelFilter && s.model_name !== state.simModelFilter) return false;
+    if (symQuery && !String(s.symbol || "").toUpperCase().includes(symQuery)) return false;
+    const pnl = simEffectivePnl(s);
+    if (state.simPresetFilter === "profitable_only" && pnl <= 0) return false;
+    if (state.simPresetFilter === "losses_only" && pnl >= 0) return false;
+    if (state.simPresetFilter === "top_profits" && pnl <= 0) return false;
+    if (
+      state.simPresetFilter === "top_achieving" &&
+      Number(s.probability ?? 0) < 0.6 &&
+      s.exit_reason !== "TARGET_HIT" &&
+      Number(s.actual_target_hit ?? 0) !== 1
+    ) {
+      return false;
+    }
+    return true;
+  });
+
+  const sorters: Record<string, (a: any, b: any) => number> = {
+    pnl_desc: (a, b) => simEffectivePnl(b) - simEffectivePnl(a) || Number(b.probability) - Number(a.probability),
+    pnl_asc: (a, b) => simEffectivePnl(a) - simEffectivePnl(b) || Number(b.probability) - Number(a.probability),
+    prob_desc: (a, b) => Number(b.probability) - Number(a.probability),
+    actual_ret_desc: (a, b) => Number(b.actual_return_pct ?? -999) - Number(a.actual_return_pct ?? -999),
+    symbol_asc: (a, b) => String(a.symbol || "").localeCompare(String(b.symbol || "")) || String(a.model_name || "").localeCompare(String(b.model_name || "")),
+    model_asc: (a, b) => String(a.model_name || "").localeCompare(String(b.model_name || "")) || Number(b.probability) - Number(a.probability),
+  };
+  const sortKey = state.simPresetFilter === "top_profits" && state.simSortBy === "pnl_desc" ? "pnl_desc" : state.simSortBy;
+  rows = rows.slice().sort(sorters[sortKey] || sorters.pnl_desc);
+  if (state.simPresetFilter === "top_profits") rows = rows.slice(0, 15);
+  return rows;
+}
+
+function renderSimTableHtml(sim: any): string {
+  const rows = filterAndSortSimSignals(sim?.signals || []);
+  if (!rows.length) {
+    return emptyBox("No generated signals match the current filters.");
+  }
+  const showActuals =
+    Boolean(sim?.is_past_date) ||
+    (sim?.signals || []).some((s: any) => s.actual_close !== null && s.actual_close !== undefined);
+
+  const body = rows
+    .map((s) => {
+      const pnl = simEffectivePnl(s);
+      const isCf = Number(s.quantity) === 0;
+      const predRet =
+        s.predicted_return_pct !== undefined && s.predicted_return_pct !== null
+          ? `${Number(s.predicted_return_pct) >= 0 ? "+" : ""}${fmtNum(s.predicted_return_pct)}%`
+          : "--";
+      const actualRet =
+        s.actual_return_pct !== undefined && s.actual_return_pct !== null
+          ? `${Number(s.actual_return_pct) >= 0 ? "+" : ""}${fmtNum(s.actual_return_pct)}%`
+          : "--";
+      const actualCells = showActuals
+        ? `<td class="num">${fmtNum(s.actual_open)} / ${fmtNum(s.actual_close)}<div class="muted">H ${fmtNum(s.actual_high)} · L ${fmtNum(s.actual_low)}</div></td>
+           <td class="num ${Number(s.actual_return_pct) > 0 ? "pos" : Number(s.actual_return_pct) < 0 ? "neg" : ""}">${actualRet}</td>`
+        : "";
+      return `<tr>
+        <td class="mono"><strong>${esc(s.symbol)}</strong></td>
+        <td>${esc(s.model_name)}${s.is_champion_trade ? ' <span class="pill pill-good">CHAMP</span>' : ""}</td>
+        <td><span class="mono">${esc(s.direction)}</span></td>
+        <td class="num">${fmtNum(s.probability, 3)}</td>
+        <td class="num">${fmtNum(s.entry_price)} / ${fmtNum(s.target_price)}<div class="muted">Stop ${fmtNum(s.stop_price)} · Pred ${predRet}</div></td>
+        ${actualCells}
+        <td>${statusPill(s.risk_decision)}</td>
+        <td class="num">${fmtInt(s.quantity)}</td>
+        <td class="num">${fmtNum(s.fill_price)} / ${fmtNum(s.exit_price)}</td>
+        <td class="mono">${esc(s.exit_reason ?? "--")}</td>
+        <td class="num ${pnl > 0 ? "pos" : pnl < 0 ? "neg" : ""}">${fmtNum(pnl)}${isCf ? ' <span class="muted">(CF)</span>' : ""}</td>
+        <td class="muted">${esc((s.decision_reason || "").slice(0, 60))}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const actualHeaders = showActuals
+    ? `<th class="num">Actual O / C</th><th class="num">Actual Ret</th>`
+    : "";
+
+  return `<div class="muted" style="margin-bottom:6px">Showing ${fmtInt(rows.length)} of ${fmtInt((sim?.signals || []).length)} signals</div>
+    <div class="table-wrap"><table><thead><tr>
+      <th>Symbol</th><th>Model</th><th>Dir</th><th class="num">Prob</th><th class="num">Pred Entry / Target</th>${actualHeaders}<th>Risk</th><th class="num">Qty</th><th class="num">Fill / Exit</th><th>Reason</th><th class="num">PnL (INR)</th><th>Decision Detail</th>
+    </tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
 async function renderSandbox(): Promise<string> {
   const qs = new URLSearchParams({ limit: "150" });
   if (state.sandboxModelFilter) qs.set("model_name", state.sandboxModelFilter);
@@ -652,40 +801,47 @@ async function renderSandbox(): Promise<string> {
   const latestDateLabel = availableDates[0] || "auto";
 
   const sim = state.lastSimulation;
-  const simSignals = sim?.signals || [];
-  const simRows = simSignals
-    .map(
-      (s: any) => `<tr>
-      <td class="mono"><strong>${esc(s.symbol)}</strong></td>
-      <td>${esc(s.model_name)}${s.is_champion_trade ? ' <span class="pill pill-good">CHAMP</span>' : ""}</td>
-      <td><span class="mono">${esc(s.direction)}</span></td>
-      <td class="num">${fmtNum(s.probability, 3)}</td>
-      <td class="num">${fmtNum(s.entry_price)}</td>
-      <td class="num">${fmtNum(s.target_price)}</td>
-      <td class="num">${fmtNum(s.stop_price)}</td>
-      <td>${statusPill(s.risk_decision)}</td>
-      <td class="num">${fmtInt(s.quantity)}</td>
-      <td class="num">${fmtNum(s.fill_price)}</td>
-      <td class="num">${fmtNum(s.exit_price)}</td>
-      <td class="mono">${esc(s.exit_reason ?? "--")}</td>
-      <td class="num">${fmtNum(s.total_cost_inr)}</td>
-      <td class="num ${Number(s.net_pnl_inr) > 0 ? "pos" : Number(s.net_pnl_inr) < 0 ? "neg" : ""}">${fmtNum(s.net_pnl_inr)}</td>
-      <td class="muted">${esc((s.decision_reason || "").slice(0, 60))}</td>
-    </tr>`
-    )
-    .join("");
+  const simModels: string[] = sim
+    ? Array.from(new Set<string>((sim.signals || []).map((s: any) => String(s.model_name || "")).filter(Boolean))).sort()
+    : [];
 
   const simBoxHtml = sim
     ? `<div class="sim-result-box">
         <div class="card-title">
-          <span>Simulation Result: ${esc(sim.trade_date || "--")} (${esc(sim.slot || "09:20")} IST) · Champion ${esc(sim.champion || "--")}</span>
+          <span>Generated Signals: ${esc(sim.trade_date || "--")} (${esc(sim.slot || "09:20")} IST) · Champion ${esc(sim.champion || "--")}${sim.is_past_date ? ' <span class="pill pill-warn">HISTORICAL · PREDICTED VS ACTUAL</span>' : ""}</span>
           <span>Executed ${fmtInt(sim.executed_champion_trades ?? 0)} · Net ${fmtInr(sim.champion_net_pnl_inr ?? 0)}</span>
         </div>
-        ${
-          simRows
-            ? `<div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Model</th><th>Dir</th><th class="num">Prob</th><th class="num">Entry</th><th class="num">Target</th><th class="num">Stop</th><th>Risk</th><th class="num">Qty</th><th class="num">Fill</th><th class="num">Exit</th><th>Reason</th><th class="num">Cost</th><th class="num">Net PnL</th><th>Decision Detail</th></tr></thead><tbody>${simRows}</tbody></table></div>`
-            : emptyBox("No qualifying signals passed probability threshold for the selected simulation.")
-        }
+        <div class="filter-bar" style="margin-bottom:10px">
+          <label>View / Preset:
+            <select id="sim-preset-filter">
+              <option value="all" ${state.simPresetFilter === "all" ? "selected" : ""}>All Signals</option>
+              <option value="top_achieving" ${state.simPresetFilter === "top_achieving" ? "selected" : ""}>Top Achieving (Prob >= 60% or Target Hit)</option>
+              <option value="top_profits" ${state.simPresetFilter === "top_profits" ? "selected" : ""}>Top Profits (PnL > 0, Top 15)</option>
+              <option value="profitable_only" ${state.simPresetFilter === "profitable_only" ? "selected" : ""}>Profitable Only (PnL > 0)</option>
+              <option value="losses_only" ${state.simPresetFilter === "losses_only" ? "selected" : ""}>Losses Only (PnL < 0)</option>
+            </select>
+          </label>
+          <label>Model:
+            <select id="sim-model-filter">
+              <option value="" ${state.simModelFilter === "" ? "selected" : ""}>All Models (${simModels.length})</option>
+              ${simModels.map((m) => `<option value="${esc(m)}" ${state.simModelFilter === m ? "selected" : ""}>${esc(m)}</option>`).join("")}
+            </select>
+          </label>
+          <label>Stock:
+            <input id="sim-symbol-filter" type="text" placeholder="Search symbol..." value="${esc(state.simSymbolFilter)}" />
+          </label>
+          <label>Sort By:
+            <select id="sim-sort-by">
+              <option value="pnl_desc" ${state.simSortBy === "pnl_desc" ? "selected" : ""}>Overall Profit/Loss (High -> Low)</option>
+              <option value="pnl_asc" ${state.simSortBy === "pnl_asc" ? "selected" : ""}>Overall Profit/Loss (Low -> High)</option>
+              <option value="prob_desc" ${state.simSortBy === "prob_desc" ? "selected" : ""}>Predicted Probability (High -> Low)</option>
+              <option value="actual_ret_desc" ${state.simSortBy === "actual_ret_desc" ? "selected" : ""}>Actual Return % (High -> Low)</option>
+              <option value="symbol_asc" ${state.simSortBy === "symbol_asc" ? "selected" : ""}>Stock Symbol (A -> Z)</option>
+              <option value="model_asc" ${state.simSortBy === "model_asc" ? "selected" : ""}>Model Name (A -> Z)</option>
+            </select>
+          </label>
+        </div>
+        <div id="sim-signals-table-wrap">${renderSimTableHtml(sim)}</div>
       </div>`
     : "";
 
@@ -694,8 +850,9 @@ async function renderSandbox(): Promise<string> {
     <div class="card control-panel">
       <div class="card-title"><span>Live / Selected-Date Signal & Paper-Trade Simulator</span><span class="mono muted">Uses current Paper Trading Options</span></div>
       <div class="form-grid">
-        <label class="form-field">Trading Date (Live / Selected)
+        <label class="form-field">Trading Date (Select Date to Enable Generate)
           <select id="sim-date-select" ${state.busyAction ? "disabled" : ""}>
+            <option value="" ${state.simDate === "" ? "selected" : ""}>-- Select a trading date --</option>
             <option value="latest" ${state.simDate === "latest" ? "selected" : ""}>Live / Latest Available (${esc(latestDateLabel)})</option>
             ${availableDates.map((dt) => `<option value="${esc(dt)}" ${state.simDate === dt ? "selected" : ""}>${esc(dt)}</option>`).join("")}
           </select>
@@ -708,7 +865,7 @@ async function renderSandbox(): Promise<string> {
         </label>
       </div>
       <div class="action-row">
-        <button id="btn-simulate-date" class="btn btn-primary" ${state.busyAction ? "disabled" : ""}>Simulate Selected Date (Signals + Paper Trades)</button>
+        <button id="btn-simulate-date" class="btn btn-primary" ${state.busyAction || !state.simDate ? "disabled" : ""}>Generate Signals & Paper Trades</button>
         <button id="btn-replay-5d" class="btn" ${state.busyAction ? "disabled" : ""}>Replay Last 5 Days</button>
         <button id="btn-replay-25d" class="btn" ${state.busyAction ? "disabled" : ""}>Replay Full 25 Days</button>
         <button id="btn-sb-train" class="btn btn-warn" ${state.busyAction ? "disabled" : ""}>Train All Models</button>
@@ -1002,12 +1159,28 @@ async function loadPage(page: PageId): Promise<void> {
       document.getElementById("train-model-select")?.addEventListener("change", (ev) => {
         state.trainTargetModel = (ev.target as HTMLSelectElement).value;
       });
+      document.getElementById("train-start-date")?.addEventListener("change", (ev) => {
+        state.trainStartDate = (ev.target as HTMLInputElement).value;
+        syncTrainButtonState();
+      });
+      document.getElementById("train-end-date")?.addEventListener("change", (ev) => {
+        state.trainEndDate = (ev.target as HTMLInputElement).value;
+        syncTrainButtonState();
+      });
       document.getElementById("btn-train-models")?.addEventListener("click", async () => {
+        if (!isTrainReady()) return;
         state.busyAction = true;
-        state.actionBanner = { tone: "warn", text: `Running walk-forward training for '${state.trainTargetModel}'...` };
+        state.actionBanner = {
+          tone: "warn",
+          text: `Running walk-forward training for '${state.trainTargetModel}' (${state.trainStartDate} to ${state.trainEndDate})...`,
+        };
         void loadPage("models");
         try {
-          const res = await postJson("/api/actions/train", { model_name: state.trainTargetModel });
+          const res = await postJson("/api/actions/train", {
+            model_name: state.trainTargetModel,
+            start_date: state.trainStartDate,
+            end_date: state.trainEndDate,
+          });
           state.lastTrainResult = res;
           state.actionBanner = { tone: "good", text: res.summary || `Completed training for ${state.trainTargetModel}.` };
         } catch (err) {
@@ -1022,9 +1195,34 @@ async function loadPage(page: PageId): Promise<void> {
     if (page === "sandbox") {
       document.getElementById("sim-date-select")?.addEventListener("change", (ev) => {
         state.simDate = (ev.target as HTMLSelectElement).value;
+        const simBtn = document.getElementById("btn-simulate-date") as HTMLButtonElement | null;
+        if (simBtn) simBtn.disabled = state.busyAction || !state.simDate;
       });
       document.getElementById("sim-slot-select")?.addEventListener("change", (ev) => {
         state.simSlot = (ev.target as HTMLSelectElement).value;
+      });
+
+      const refreshSimTableOnly = (): void => {
+        const wrap = document.getElementById("sim-signals-table-wrap");
+        if (wrap && state.lastSimulation) {
+          wrap.innerHTML = renderSimTableHtml(state.lastSimulation);
+        }
+      };
+      document.getElementById("sim-preset-filter")?.addEventListener("change", (ev) => {
+        state.simPresetFilter = (ev.target as HTMLSelectElement).value;
+        refreshSimTableOnly();
+      });
+      document.getElementById("sim-model-filter")?.addEventListener("change", (ev) => {
+        state.simModelFilter = (ev.target as HTMLSelectElement).value;
+        refreshSimTableOnly();
+      });
+      document.getElementById("sim-symbol-filter")?.addEventListener("input", (ev) => {
+        state.simSymbolFilter = (ev.target as HTMLInputElement).value;
+        refreshSimTableOnly();
+      });
+      document.getElementById("sim-sort-by")?.addEventListener("change", (ev) => {
+        state.simSortBy = (ev.target as HTMLSelectElement).value;
+        refreshSimTableOnly();
       });
 
       document.getElementById("btn-save-options")?.addEventListener("click", async () => {

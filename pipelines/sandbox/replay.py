@@ -74,6 +74,72 @@ def _run_model_inference(bundle: dict[str, Any], snap_df: pd.DataFrame, min_prob
     )
 
 
+def _serialize_signal_record(r: dict[str, Any], bar_by_isin: dict[str, Any]) -> dict[str, Any]:
+    """Serialize a journal record with predicted vs. actual bar metrics for UI display."""
+    entry = float(r["entry_price"])
+    target = float(r["target_price"])
+    direction = str(r["direction"]).upper()
+    if entry > 0:
+        pred_ret = ((entry - target) / entry) * 100.0 if direction == "SHORT" else ((target - entry) / entry) * 100.0
+    else:
+        pred_ret = 0.0
+
+    bar = bar_by_isin.get(str(r.get("isin", "")))
+    actual_open = round(float(bar["open"]), 2) if bar is not None and pd.notna(bar.get("open")) else None
+    actual_high = round(float(bar["high"]), 2) if bar is not None and pd.notna(bar.get("high")) else None
+    actual_low = round(float(bar["low"]), 2) if bar is not None and pd.notna(bar.get("low")) else None
+    actual_close = round(float(bar["close"]), 2) if bar is not None and pd.notna(bar.get("close")) else None
+    actual_ret = (
+        round(((actual_close - actual_open) / actual_open) * 100.0, 2)
+        if actual_open and actual_open > 0 and actual_close is not None
+        else None
+    )
+    actual_target_hit = (
+        int(bar["target_hit"])
+        if bar is not None and "target_hit" in bar and pd.notna(bar.get("target_hit"))
+        else None
+    )
+    qty = int(r["quantity"])
+    cf_pnl = round(float(r["counterfactual_pnl_inr"]), 2) if r["counterfactual_pnl_inr"] is not None else None
+    net_pnl = round(float(r["net_pnl_inr"]), 2)
+    effective_pnl = net_pnl if qty > 0 else (cf_pnl if cf_pnl is not None else 0.0)
+
+    return {
+        "trade_date": str(r["trade_date"]),
+        "snapshot_slot": r["snapshot_slot"],
+        "model_name": r["model_name"],
+        "symbol": r["symbol"],
+        "sector": r["sector"],
+        "direction": r["direction"],
+        "probability": round(float(r["probability"]), 4),
+        "entry_price": round(entry, 2),
+        "target_price": round(target, 2),
+        "stop_price": round(float(r["stop_price"]), 2),
+        "predicted_return_pct": round(pred_ret, 2),
+        "actual_open": actual_open,
+        "actual_high": actual_high,
+        "actual_low": actual_low,
+        "actual_close": actual_close,
+        "actual_return_pct": actual_ret,
+        "actual_target_hit": actual_target_hit,
+        "coordinator_decision": r["coordinator_decision"],
+        "llm_decision": r["llm_decision"],
+        "risk_decision": r["risk_decision"],
+        "decision_reason": r["decision_reason"],
+        "is_champion_trade": bool(r["is_champion_trade"]),
+        "quantity": qty,
+        "fill_price": round(float(r["fill_price"]), 2) if r["fill_price"] is not None else None,
+        "exit_price": round(float(r["exit_price"]), 2) if r["exit_price"] is not None else None,
+        "exit_reason": r["exit_reason"],
+        "slippage_inr": round(float(r["slippage_inr"]), 2),
+        "total_cost_inr": round(float(r["total_cost_inr"]), 2),
+        "gross_pnl_inr": round(float(r["gross_pnl_inr"]), 2),
+        "net_pnl_inr": net_pnl,
+        "counterfactual_pnl_inr": cf_pnl,
+        "effective_pnl_inr": effective_pnl,
+    }
+
+
 def replay_date(
     trade_date: date,
     slot: str = "09:20",
@@ -279,44 +345,18 @@ def replay_date(
 
     log.info(f"Replay complete: {summary}")
     display_recs = sorted(
-        champ_recs if champ_recs else records,
-        key=lambda r: (-int(r["quantity"] > 0), -float(r["probability"])),
+        records,
+        key=lambda r: (
+            -int(bool(r["is_champion_trade"])),
+            -int(r["quantity"] > 0),
+            -float(r["probability"]),
+        ),
     )
-    signals_out = [
-        {
-            "trade_date": str(r["trade_date"]),
-            "snapshot_slot": r["snapshot_slot"],
-            "model_name": r["model_name"],
-            "symbol": r["symbol"],
-            "sector": r["sector"],
-            "direction": r["direction"],
-            "probability": round(float(r["probability"]), 4),
-            "entry_price": round(float(r["entry_price"]), 2),
-            "target_price": round(float(r["target_price"]), 2),
-            "stop_price": round(float(r["stop_price"]), 2),
-            "coordinator_decision": r["coordinator_decision"],
-            "llm_decision": r["llm_decision"],
-            "risk_decision": r["risk_decision"],
-            "decision_reason": r["decision_reason"],
-            "is_champion_trade": bool(r["is_champion_trade"]),
-            "quantity": int(r["quantity"]),
-            "fill_price": round(float(r["fill_price"]), 2) if r["fill_price"] is not None else None,
-            "exit_price": round(float(r["exit_price"]), 2) if r["exit_price"] is not None else None,
-            "exit_reason": r["exit_reason"],
-            "slippage_inr": round(float(r["slippage_inr"]), 2),
-            "total_cost_inr": round(float(r["total_cost_inr"]), 2),
-            "gross_pnl_inr": round(float(r["gross_pnl_inr"]), 2),
-            "net_pnl_inr": round(float(r["net_pnl_inr"]), 2),
-            "counterfactual_pnl_inr": (
-                round(float(r["counterfactual_pnl_inr"]), 2)
-                if r["counterfactual_pnl_inr"] is not None
-                else None
-            ),
-        }
-        for r in display_recs[:24]
-    ]
+    signals_out = [_serialize_signal_record(r, bar_by_isin) for r in display_recs[:150]]
+    is_past_date = trade_date < datetime.now(IST).date()
     return {
         "trade_date": trade_date.isoformat(),
+        "is_past_date": is_past_date,
         "slot": slot,
         "tradeable": tradeable,
         "reasons": reasons,

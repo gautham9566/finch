@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import date, datetime
 from datetime import time as dtime
 from pathlib import Path
 from typing import Any
@@ -111,7 +111,44 @@ def train_single_model(
     }
 
 
-def train_all(allow_market_hours: bool = False) -> list[dict[str, Any]]:
+def filter_training_dataframe(
+    df: pd.DataFrame,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> tuple[pd.DataFrame, str]:
+    """Slice feature dataframe to [start_date, end_date] and compute effective dataset version tag."""
+    base_dv = str(df["dataset_version"].iloc[0]) if "dataset_version" in df.columns and not df.empty else "unknown"
+    if start_date is None and end_date is None:
+        return df, base_dv
+
+    dt_series = pd.to_datetime(df["trade_date"]).dt.date
+    mask = pd.Series(True, index=df.index)
+    if start_date is not None:
+        mask &= dt_series >= start_date
+    if end_date is not None:
+        mask &= dt_series <= end_date
+
+    sliced = df.loc[mask].copy().reset_index(drop=True)
+    if sliced.empty:
+        raise ValueError(f"No feature rows found in date range {start_date} to {end_date}.")
+
+    unique_days = int(pd.to_datetime(sliced["trade_date"]).dt.date.nunique())
+    if unique_days < 20:
+        raise ValueError(
+            f"Date range {start_date} to {end_date} has only {unique_days} trading days; "
+            "at least 20 trading days are required for walk-forward training."
+        )
+
+    eff_start = start_date.isoformat() if start_date else str(dt_series.loc[mask].min())
+    eff_end = end_date.isoformat() if end_date else str(dt_series.loc[mask].max())
+    return sliced, f"{base_dv}_{eff_start}_{eff_end}"
+
+
+def train_all(
+    allow_market_hours: bool = False,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> list[dict[str, Any]]:
     started = datetime.now(IST)
     if _in_nse_market_hours(started) and not allow_market_hours:
         raise RuntimeError(
@@ -120,8 +157,8 @@ def train_all(allow_market_hours: bool = False) -> list[dict[str, Any]]:
 
     init_schema()
     feat_path = DATA_DIR / "features" / "features_daily.parquet"
-    df = pd.read_parquet(feat_path)
-    dataset_version = str(df["dataset_version"].iloc[0]) if "dataset_version" in df.columns else "unknown"
+    raw_df = pd.read_parquet(feat_path)
+    df, dataset_version = filter_training_dataframe(raw_df, start_date=start_date, end_date=end_date)
     git_commit = get_git_commit()
 
     configs = [c for c in load_all_model_configs() if c.get("enabled", True)]

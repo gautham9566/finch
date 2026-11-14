@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
+import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from pipelines.data import quality as q_mod
+from pipelines.sandbox.replay import _serialize_signal_record
+from pipelines.training.cli import filter_training_dataframe
 from web.backend import actions as actions_mod
 from web.backend.main import app
 
@@ -45,6 +49,24 @@ def test_web_action_endpoints_validation_and_handlers(monkeypatch, tmp_path: Pat
     bad_model = client.post("/api/actions/train", json={"model_name": "nonexistent_model_xyz"})
     assert bad_model.status_code == 400
 
+    bad_range = client.post(
+        "/api/actions/train",
+        json={"model_name": "all", "start_date": "2026-06-10", "end_date": "2026-06-01"},
+    )
+    assert bad_range.status_code == 400
+
+    bad_date_fmt = client.post(
+        "/api/actions/train",
+        json={"model_name": "all", "start_date": "2026/06/01", "end_date": "2026-06-10"},
+    )
+    assert bad_date_fmt.status_code == 400
+
+    unpaired_date = client.post(
+        "/api/actions/train",
+        json={"model_name": "all", "start_date": "2026-06-01"},
+    )
+    assert unpaired_date.status_code == 400
+
     monkeypatch.setattr(
         actions_mod,
         "reset_sandbox_trades",
@@ -68,3 +90,52 @@ def test_missing_data_source_marks_day_untradeable_without_crashing(monkeypatch,
     assert report.tradeable is False
     assert report.intraday_status == "intraday: not configured"
     assert any("CRITICAL" in r for r in report.reasons)
+
+
+def test_filter_training_dataframe_and_signal_serialization() -> None:
+    base = date(2026, 1, 1)
+    rows = [{"trade_date": base + timedelta(days=i), "dataset_version": "v1"} for i in range(30)]
+    df = pd.DataFrame(rows)
+
+    sliced, ver = filter_training_dataframe(df, start_date=date(2026, 1, 5), end_date=date(2026, 1, 28))
+    assert len(sliced) == 24
+    assert ver == "v1_2026-01-05_2026-01-28"
+
+    with pytest.raises(ValueError, match="at least 20"):
+        filter_training_dataframe(df, start_date=date(2026, 1, 1), end_date=date(2026, 1, 10))
+
+    rec = {
+        "trade_date": date(2026, 1, 15),
+        "snapshot_slot": "09:20",
+        "model_name": "lightgbm_v1",
+        "isin": "INE002A01018",
+        "symbol": "RELIANCE",
+        "sector": "Energy",
+        "direction": "LONG",
+        "probability": 0.72,
+        "entry_price": 1000.0,
+        "target_price": 1020.0,
+        "stop_price": 990.0,
+        "coordinator_decision": "BUY",
+        "llm_decision": "APPROVE",
+        "risk_decision": "REJECTED",
+        "decision_reason": "max trades",
+        "is_champion_trade": False,
+        "quantity": 0,
+        "fill_price": None,
+        "exit_price": None,
+        "exit_reason": "REJECTED",
+        "slippage_inr": 0.0,
+        "total_cost_inr": 0.0,
+        "gross_pnl_inr": 0.0,
+        "net_pnl_inr": 0.0,
+        "counterfactual_pnl_inr": 350.0,
+    }
+    bar = {"open": 1000.0, "high": 1025.0, "low": 995.0, "close": 1015.0, "target_hit": 1}
+    serialized = _serialize_signal_record(rec, {"INE002A01018": bar})
+    assert serialized["predicted_return_pct"] == 2.0
+    assert serialized["actual_open"] == 1000.0
+    assert serialized["actual_close"] == 1015.0
+    assert serialized["actual_return_pct"] == 1.5
+    assert serialized["actual_target_hit"] == 1
+    assert serialized["effective_pnl_inr"] == 350.0
