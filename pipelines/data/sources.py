@@ -28,11 +28,7 @@ INDEX_TICKERS = {
 
 _YAHOO_HOSTS = ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
 _YAHOO_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0",
 }
 _THREAD_LOCAL = threading.local()
 
@@ -67,25 +63,31 @@ def fetch_yahoo_chart_ohlcv(
     http = session or _get_yahoo_session()
 
     payload: dict[str, object] | None = None
-    for attempt in range(3):
+    last_status: int | None = None
+    for attempt in range(4):
         host = _YAHOO_HOSTS[attempt % len(_YAHOO_HOSTS)]
         url = f"https://{host}/v8/finance/chart/{encoded}"
         try:
             resp = http.get(url, params=params, timeout=timeout)
+            last_status = resp.status_code
             if resp.status_code == 404:
                 log.warning(f"Yahoo chart 404 for {ticker}")
                 return pd.DataFrame()
             if resp.status_code in (429, 500, 502, 503, 504):
-                time.sleep(0.5 * (attempt + 1))
+                time.sleep(0.6 * (attempt + 1))
                 continue
             resp.raise_for_status()
             payload = resp.json()
             break
         except (requests.RequestException, ValueError) as exc:
-            if attempt == 2:
+            if attempt == 3:
                 log.warning(f"Yahoo chart failed for {ticker}: {exc}")
                 return pd.DataFrame()
-            time.sleep(0.5 * (attempt + 1))
+            time.sleep(0.6 * (attempt + 1))
+
+    if payload is None:
+        log.warning(f"Yahoo chart gave no payload for {ticker} (last HTTP {last_status})")
+        return pd.DataFrame()
 
     if not payload or not isinstance(payload, dict):
         return pd.DataFrame()
@@ -167,6 +169,7 @@ def fetch_daily_equities(universe_df: pd.DataFrame, years: int = 4, batch_size: 
     _ = batch_size
 
     def _fetch_one(sym: str) -> pd.DataFrame | None:
+        time.sleep(0.05)
         sub = fetch_yahoo_chart_ohlcv(f"{sym}.NS", start_dt, end_dt, auto_adjust=True)
         if sub.empty:
             return None
@@ -190,7 +193,7 @@ def fetch_daily_equities(universe_df: pd.DataFrame, years: int = 4, batch_size: 
         return out_sub
 
     log.info(f"Fetching daily OHLCV for {len(symbols)} NSE symbols via Yahoo chart JSON")
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {pool.submit(_fetch_one, sym): sym for sym in symbols}
         for fut in as_completed(futures):
             df_sym = fut.result()
