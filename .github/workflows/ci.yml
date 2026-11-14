@@ -1,9 +1,12 @@
 name: Finch CI
 
+# Automatic triggers commented out while focusing on local training.
+# Uncomment push/pull_request when re-enabling remote CI.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
+#   push:
+#     branches: [main]
+#   pull_request:
 
 jobs:
   verify:
