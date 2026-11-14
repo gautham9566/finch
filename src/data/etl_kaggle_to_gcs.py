@@ -3,40 +3,73 @@
 import json
 import os
 import subprocess
+import zipfile
 from pathlib import Path
 import duckdb
 import kagglehub
+import requests
 
 BUCKET = os.getenv("FINCH_BUCKET", "gs://finch-514709-lake")
 KAGGLE_DATASET = "nikhilkop/nse-750-clean-1min"
 LOCAL_DIR = "/tmp/finch_kaggle"
 
 
-def _load_kaggle_token() -> None:
-    """Support new KAGGLE_API_TOKEN format inside kaggle.json."""
+def _load_kaggle_token() -> str | None:
+    """Resolve KAGGLE_API_TOKEN from env, Colab Secrets, or ~/.kaggle/kaggle.json."""
+    if tok := os.getenv("KAGGLE_API_TOKEN"):
+        return tok
+    try:
+        from google.colab import userdata
+        if tok := userdata.get("KAGGLE_API_TOKEN"):
+            os.environ["KAGGLE_API_TOKEN"] = tok
+            return tok
+    except Exception:
+        pass
     kaggle_json = Path.home() / ".kaggle" / "kaggle.json"
     if not kaggle_json.exists():
-        return
+        return None
     data = json.loads(kaggle_json.read_text())
-    if "KAGGLE_API_TOKEN" in data and not os.getenv("KAGGLE_API_TOKEN"):
-        token = data["KAGGLE_API_TOKEN"]
+    if token := data.get("KAGGLE_API_TOKEN"):
         os.environ["KAGGLE_API_TOKEN"] = token
         access_token = kaggle_json.parent / "access_token"
         access_token.write_text(token)
         os.chmod(access_token, 0o600)
+        return token
+    return None
+
+
+def _download_via_bearer(token: str) -> str:
+    """Stream-download dataset zip using Kaggle Bearer token."""
+    zip_path = Path(LOCAL_DIR) / "dataset.zip"
+    url = f"https://www.kaggle.com/api/v1/datasets/download/{KAGGLE_DATASET}"
+    with requests.get(url, headers={"Authorization": f"Bearer {token}"}, stream=True, timeout=600) as r:
+        r.raise_for_status()
+        with open(zip_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(LOCAL_DIR)
+    zip_path.unlink()
+    return LOCAL_DIR
 
 
 def download_kaggle() -> str:
-    """Download Kaggle dataset via kagglehub and symlink into LOCAL_DIR (zero extra disk)."""
-    _load_kaggle_token()
+    """Download Kaggle dataset via kagglehub, falling back to Bearer zip stream."""
+    token = _load_kaggle_token()
     os.makedirs(LOCAL_DIR, exist_ok=True)
-    cached_path = kagglehub.dataset_download(KAGGLE_DATASET)
-    for name in os.listdir(cached_path):
-        src = os.path.join(cached_path, name)
-        dst = os.path.join(LOCAL_DIR, name)
-        if not os.path.exists(dst):
-            os.symlink(src, dst)
-    return LOCAL_DIR
+    try:
+        cached_path = kagglehub.dataset_download(KAGGLE_DATASET)
+        for name in os.listdir(cached_path):
+            src = os.path.join(cached_path, name)
+            dst = os.path.join(LOCAL_DIR, name)
+            if not os.path.exists(dst):
+                os.symlink(src, dst)
+        return LOCAL_DIR
+    except Exception:
+        if not token:
+            raise
+        return _download_via_bearer(token)
 
 
 def upload_raw_to_gcs(local_dir: str) -> None:
