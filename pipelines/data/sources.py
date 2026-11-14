@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import yfinance as yf
+import requests
 
 from libs.common.config import DATA_DIR, get_markets_config
 from libs.common.db import get_conn
@@ -22,6 +26,134 @@ INDEX_TICKERS = {
     "^NSEBANK": "NIFTYBANK",
 }
 
+_YAHOO_HOSTS = ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
+_YAHOO_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+}
+_THREAD_LOCAL = threading.local()
+
+
+def _get_yahoo_session() -> requests.Session:
+    sess = getattr(_THREAD_LOCAL, "session", None)
+    if not isinstance(sess, requests.Session):
+        sess = requests.Session()
+        sess.headers.update(_YAHOO_HEADERS)
+        _THREAD_LOCAL.session = sess
+    return sess
+
+
+def fetch_yahoo_chart_ohlcv(
+    ticker: str,
+    start_dt: date,
+    end_dt: date,
+    auto_adjust: bool = True,
+    timeout: int = 20,
+    session: requests.Session | None = None,
+) -> pd.DataFrame:
+    """Fetch daily OHLCV directly from Yahoo Finance v8 chart JSON (bypasses broken crumb flow)."""
+    period1 = int(datetime(start_dt.year, start_dt.month, start_dt.day, tzinfo=UTC).timestamp())
+    period2 = int(datetime(end_dt.year, end_dt.month, end_dt.day, tzinfo=UTC).timestamp())
+    encoded = quote(ticker, safe="")
+    params: dict[str, str | int] = {
+        "period1": period1,
+        "period2": period2,
+        "interval": "1d",
+        "events": "div,split",
+    }
+    http = session or _get_yahoo_session()
+
+    payload: dict[str, object] | None = None
+    for attempt in range(3):
+        host = _YAHOO_HOSTS[attempt % len(_YAHOO_HOSTS)]
+        url = f"https://{host}/v8/finance/chart/{encoded}"
+        try:
+            resp = http.get(url, params=params, timeout=timeout)
+            if resp.status_code == 404:
+                log.warning(f"Yahoo chart 404 for {ticker}")
+                return pd.DataFrame()
+            if resp.status_code in (429, 500, 502, 503, 504):
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            resp.raise_for_status()
+            payload = resp.json()
+            break
+        except (requests.RequestException, ValueError) as exc:
+            if attempt == 2:
+                log.warning(f"Yahoo chart failed for {ticker}: {exc}")
+                return pd.DataFrame()
+            time.sleep(0.5 * (attempt + 1))
+
+    if not payload or not isinstance(payload, dict):
+        return pd.DataFrame()
+    chart = payload.get("chart")
+    if not isinstance(chart, dict):
+        return pd.DataFrame()
+    results = chart.get("result")
+    if not isinstance(results, list) or not results or not isinstance(results[0], dict):
+        err = chart.get("error")
+        if err:
+            log.warning(f"Yahoo chart error for {ticker}: {err}")
+        return pd.DataFrame()
+
+    res = results[0]
+    timestamps = res.get("timestamp") or []
+    indicators = res.get("indicators") or {}
+    quote_list = indicators.get("quote") or []
+    if not timestamps or not quote_list or not isinstance(quote_list[0], dict):
+        return pd.DataFrame()
+    q = quote_list[0]
+
+    tz_name = str((res.get("meta") or {}).get("exchangeTimezoneName") or "UTC")
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:  # noqa: BLE001
+        tz = ZoneInfo("UTC")
+
+    trade_dates = pd.to_datetime(timestamps, unit="s", utc=True).tz_convert(tz).date
+    df = pd.DataFrame(
+        {
+            "trade_date": trade_dates,
+            "open": pd.to_numeric(pd.Series(q.get("open", [None] * len(timestamps))), errors="coerce"),
+            "high": pd.to_numeric(pd.Series(q.get("high", [None] * len(timestamps))), errors="coerce"),
+            "low": pd.to_numeric(pd.Series(q.get("low", [None] * len(timestamps))), errors="coerce"),
+            "close": pd.to_numeric(pd.Series(q.get("close", [None] * len(timestamps))), errors="coerce"),
+            "volume": pd.to_numeric(pd.Series(q.get("volume", [0] * len(timestamps))), errors="coerce")
+            .fillna(0)
+            .astype("int64"),
+        }
+    )
+
+    adj_list = indicators.get("adjclose") or []
+    adj_vals = adj_list[0].get("adjclose") if adj_list and isinstance(adj_list[0], dict) else None
+    if auto_adjust and isinstance(adj_vals, list) and len(adj_vals) == len(timestamps):
+        df["adj_close"] = pd.to_numeric(pd.Series(adj_vals), errors="coerce")
+    else:
+        df["adj_close"] = pd.Series(float("nan"), index=df.index, dtype="float64")
+
+    df = df.dropna(subset=["open", "high", "low", "close"]).copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    if auto_adjust:
+        valid = df["adj_close"].notna() & (df["close"] > 0)
+        if valid.any():
+            factor = pd.Series(1.0, index=df.index, dtype="float64")
+            factor.loc[valid] = df.loc[valid, "adj_close"] / df.loc[valid, "close"]
+            for col in ("open", "high", "low", "close"):
+                df[col] = (df[col] * factor).astype("float64")
+
+    df = (
+        df[["trade_date", "open", "high", "low", "close", "volume"]]
+        .sort_values("trade_date")
+        .drop_duplicates(subset=["trade_date"], keep="last")
+        .reset_index(drop=True)
+    )
+    return df
+
 
 def fetch_daily_equities(universe_df: pd.DataFrame, years: int = 4, batch_size: int = 40) -> pd.DataFrame:
     """Download multi-year split/dividend-adjusted NSE daily OHLCV keyed by ISIN and symbol."""
@@ -32,51 +164,38 @@ def fetch_daily_equities(universe_df: pd.DataFrame, years: int = 4, batch_size: 
 
     symbols = list(universe_df["symbol"].unique())
     records: list[pd.DataFrame] = []
+    _ = batch_size
 
-    for idx in range(0, len(symbols), batch_size):
-        chunk = symbols[idx : idx + batch_size]
-        yf_tickers = [f"{s}.NS" for s in chunk]
-        log.info(f"Fetching daily OHLCV batch {idx // batch_size + 1}/{(len(symbols) - 1) // batch_size + 1}")
-        raw = yf.download(
-            tickers=yf_tickers,
-            start=start_dt.isoformat(),
-            end=end_dt.isoformat(),
-            interval="1d",
-            auto_adjust=True,
-            group_by="ticker",
-            threads=True,
-            progress=False,
+    def _fetch_one(sym: str) -> pd.DataFrame | None:
+        sub = fetch_yahoo_chart_ohlcv(f"{sym}.NS", start_dt, end_dt, auto_adjust=True)
+        if sub.empty:
+            return None
+        out_sub = pd.DataFrame(
+            {
+                "isin": isin_map[sym],
+                "symbol": sym,
+                "sector": sector_map[sym],
+                "trade_date": sub["trade_date"],
+                "open": sub["open"].astype(float),
+                "high": sub["high"].astype(float),
+                "low": sub["low"].astype(float),
+                "close": sub["close"].astype(float),
+                "volume": sub["volume"].astype("int64"),
+            }
         )
-        if raw.empty:
-            continue
-        for sym in chunk:
-            yt = f"{sym}.NS"
-            try:
-                sub = raw[yt].copy() if isinstance(raw.columns, pd.MultiIndex) else raw.copy()
-            except KeyError:
-                continue
-            sub = sub.dropna(subset=["Open", "High", "Low", "Close"]).reset_index()
-            if sub.empty:
-                continue
-            dt_col = "Date" if "Date" in sub.columns else sub.columns[0]
-            sub = pd.DataFrame(
-                {
-                    "isin": isin_map[sym],
-                    "symbol": sym,
-                    "sector": sector_map[sym],
-                    "trade_date": pd.to_datetime(sub[dt_col]).dt.date,
-                    "open": sub["Open"].astype(float),
-                    "high": sub["High"].astype(float),
-                    "low": sub["Low"].astype(float),
-                    "close": sub["Close"].astype(float),
-                    "volume": sub["Volume"].fillna(0).astype("int64"),
-                }
-            )
-            sub["traded_value_inr"] = sub["close"] * sub["volume"]
-            # EOD bar is only known after NSE close (16:00 IST on that trade_date)
-            sub["known_as_of"] = pd.to_datetime(sub["trade_date"].astype(str) + " 16:00:00+05:30")
-            sub["source"] = "yfinance_nse_adj"
-            records.append(sub)
+        out_sub["traded_value_inr"] = out_sub["close"] * out_sub["volume"]
+        # EOD bar is only known after NSE close (16:00 IST on that trade_date)
+        out_sub["known_as_of"] = pd.to_datetime(out_sub["trade_date"].astype(str) + " 16:00:00+05:30")
+        out_sub["source"] = "yahoo_chart_nse_adj"
+        return out_sub
+
+    log.info(f"Fetching daily OHLCV for {len(symbols)} NSE symbols via Yahoo chart JSON")
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {pool.submit(_fetch_one, sym): sym for sym in symbols}
+        for fut in as_completed(futures):
+            df_sym = fut.result()
+            if df_sym is not None and not df_sym.empty:
+                records.append(df_sym)
 
     if not records:
         raise RuntimeError("No Indian daily equity rows fetched")
@@ -93,22 +212,19 @@ def fetch_benchmark_indices(years: int = 4) -> pd.DataFrame:
     start_dt = date.today() - timedelta(days=365 * years + 45)
     frames = []
     for ticker, name in INDEX_TICKERS.items():
-        hist = (
-            yf.Ticker(ticker).history(start=start_dt.isoformat(), end=end_dt.isoformat(), interval="1d").reset_index()
-        )
+        hist = fetch_yahoo_chart_ohlcv(ticker, start_dt, end_dt, auto_adjust=False)
         if hist.empty:
             continue
-        dt_col = "Date" if "Date" in hist.columns else hist.columns[0]
         df = pd.DataFrame(
             {
                 "symbol": name,
                 "ticker": ticker,
-                "trade_date": pd.to_datetime(hist[dt_col]).dt.date,
-                "open": hist["Open"].astype(float),
-                "high": hist["High"].astype(float),
-                "low": hist["Low"].astype(float),
-                "close": hist["Close"].astype(float),
-                "volume": hist["Volume"].fillna(0).astype("int64"),
+                "trade_date": hist["trade_date"],
+                "open": hist["open"].astype(float),
+                "high": hist["high"].astype(float),
+                "low": hist["low"].astype(float),
+                "close": hist["close"].astype(float),
+                "volume": hist["volume"].astype("int64"),
             }
         )
         df["known_as_of"] = pd.to_datetime(df["trade_date"].astype(str) + " 16:00:00+05:30")

@@ -8,11 +8,11 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import yfinance as yf
 
 from libs.common.config import DATA_DIR, get_markets_config
 from libs.common.db import get_conn
 from libs.common.logging import get_logger
+from pipelines.data.sources import fetch_yahoo_chart_ohlcv
 
 IST = ZoneInfo("Asia/Kolkata")
 log = get_logger("finch.data.global_cues")
@@ -27,7 +27,7 @@ class GlobalCuesSource(ABC):
 
 
 class YahooGlobalCuesAdapter(GlobalCuesSource):
-    """Free global macro & index adapter backed by Yahoo Finance."""
+    """Free global macro & index adapter backed by Yahoo Finance v8 chart API."""
 
     def fetch_history(self, years: int = 4) -> pd.DataFrame:
         cfg = get_markets_config()
@@ -39,24 +39,21 @@ class YahooGlobalCuesAdapter(GlobalCuesSource):
 
         for item in cues:
             sym = item["symbol"]
-            hist = (
-                yf.Ticker(sym).history(start=start_dt.isoformat(), end=end_dt.isoformat(), interval="1d").reset_index()
-            )
+            hist = fetch_yahoo_chart_ohlcv(sym, start_dt, end_dt, auto_adjust=False)
             if hist.empty:
                 log.warning(f"Global cue {sym} returned no rows")
                 continue
-            dt_col = "Date" if "Date" in hist.columns else hist.columns[0]
             df = pd.DataFrame(
                 {
                     "symbol": sym,
                     "name": item["name"],
                     "region": item["region"],
-                    "obs_date": pd.to_datetime(hist[dt_col]).dt.date,
-                    "open": hist["Open"].astype(float),
-                    "high": hist["High"].astype(float),
-                    "low": hist["Low"].astype(float),
-                    "close": hist["Close"].astype(float),
-                    "source": "yfinance",
+                    "obs_date": hist["trade_date"],
+                    "open": hist["open"].astype(float),
+                    "high": hist["high"].astype(float),
+                    "low": hist["low"].astype(float),
+                    "close": hist["close"].astype(float),
+                    "source": "yahoo_chart",
                     "receipt_timestamp": receipt_ts,
                 }
             )
