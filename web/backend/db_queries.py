@@ -42,10 +42,14 @@ def _serialize(obj: Any) -> Any:
 
 
 def _rows(query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-    init_schema()
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(query, params)
-        return [_serialize(dict(r)) for r in cur.fetchall()]
+    try:
+        init_schema()
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(query, params)
+            return [_serialize(dict(r)) for r in cur.fetchall()]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"Database query skipped (offline/unavailable): {exc}")
+        return []
 
 
 def _one(query: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:

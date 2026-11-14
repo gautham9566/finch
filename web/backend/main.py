@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Body, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from web.backend.actions import (
     get_paper_options_payload,
@@ -132,3 +134,8 @@ def api_post_train(payload: Annotated[dict[str, Any] | None, Body()] = None) -> 
 @app.get("/api/actions/train/status")
 def api_get_train_status() -> dict:
     return get_training_status()
+
+
+_FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
+if _FRONTEND_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")

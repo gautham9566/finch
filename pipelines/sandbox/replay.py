@@ -147,7 +147,10 @@ def replay_date(
     risk_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Deterministically simulate one trading day across champion + shadow models."""
-    init_schema()
+    try:
+        init_schema()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"DB schema init skipped (offline/unavailable): {exc}")
     started = datetime.now(IST)
     tradeable, reasons = is_day_tradeable(trade_date)
 
