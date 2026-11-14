@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import pickle
 import subprocess
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from libs.common.storage import upload_file_to_gcs
 
 IST = ZoneInfo("Asia/Kolkata")
 log = get_logger("finch.training.registry")
+_MLFLOW_LOCK = threading.Lock()
 
 
 def get_git_commit() -> str:
@@ -58,33 +60,34 @@ def log_to_mlflow(
     """Log params, metrics, dataset version, git commit, and artifact to MLflow."""
     tracking_uri = get_gcp_settings()["mlflow_uri"]
     try:
-        mlflow.set_tracking_uri(tracking_uri)
-        mlflow.set_experiment("finch-nse-intraday")
-        with mlflow.start_run(run_name=model_name) as run:
-            mlflow.log_params(
-                {
-                    "model_name": model_name,
-                    "model_type": model_cfg["model_type"],
-                    "agent": model_cfg["agent"],
-                    "dataset_version": dataset_version,
-                    "git_commit": git_commit,
-                    **{f"p_{k}": v for k, v in model_cfg.get("params", {}).items()},
-                }
-            )
-            mlflow.log_metrics(
-                {
-                    "train_auc": float(scorecard["train_auc"]),
-                    "val_auc": float(scorecard["val_auc"]),
-                    "test_auc": float(scorecard["test_auc"]),
-                    "ece": float(scorecard["ece"]),
-                    "net_return_pct": float(scorecard["net_return_pct"]),
-                    "max_drawdown_pct": float(scorecard["max_drawdown_pct"]),
-                    "win_rate": float(scorecard["win_rate"]),
-                    "profit_factor": float(scorecard["profit_factor"]),
-                }
-            )
-            mlflow.log_artifact(str(artifact_path))
-            return str(run.info.run_id)
+        with _MLFLOW_LOCK:
+            mlflow.set_tracking_uri(tracking_uri)
+            mlflow.set_experiment("finch-nse-intraday")
+            with mlflow.start_run(run_name=model_name) as run:
+                mlflow.log_params(
+                    {
+                        "model_name": model_name,
+                        "model_type": model_cfg["model_type"],
+                        "agent": model_cfg["agent"],
+                        "dataset_version": dataset_version,
+                        "git_commit": git_commit,
+                        **{f"p_{k}": v for k, v in model_cfg.get("params", {}).items()},
+                    }
+                )
+                mlflow.log_metrics(
+                    {
+                        "train_auc": float(scorecard["train_auc"]),
+                        "val_auc": float(scorecard["val_auc"]),
+                        "test_auc": float(scorecard["test_auc"]),
+                        "ece": float(scorecard["ece"]),
+                        "net_return_pct": float(scorecard["net_return_pct"]),
+                        "max_drawdown_pct": float(scorecard["max_drawdown_pct"]),
+                        "win_rate": float(scorecard["win_rate"]),
+                        "profit_factor": float(scorecard["profit_factor"]),
+                    }
+                )
+                mlflow.log_artifact(str(artifact_path))
+                return str(run.info.run_id)
     except Exception as exc:  # noqa: BLE001
         log.warning(f"MLflow unavailable for {model_name}, recording local run id: {exc}")
         return f"local-{model_name}-{dataset_version}"

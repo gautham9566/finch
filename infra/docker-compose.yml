@@ -31,7 +31,7 @@ services:
       - --port
       - "5000"
       - --backend-store-uri
-      - postgresql+psycopg://${POSTGRES_USER:-finch}:${POSTGRES_PASSWORD:-finch_pass}@postgres:5432/${POSTGRES_DB:-finch}
+      - postgresql+psycopg2://${POSTGRES_USER:-finch}:${POSTGRES_PASSWORD:-finch_pass}@postgres:5432/${POSTGRES_DB:-finch}
       - --default-artifact-root
       - /var/lib/finch/mlflow-artifacts
     volumes:

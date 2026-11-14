@@ -64,8 +64,12 @@ class RegimeModelWrapper:
         return np.column_stack([1.0 - probs, probs])
 
 
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -40.0, 40.0)))
+
+
 class SequenceGRUModel:
-    """Small CPU-capable GRU (uses PyTorch nn.GRU when available, else regularized temporal ridge-logit)."""
+    """Small CPU-capable GRU (trains via PyTorch nn.GRU when available, infers via pure numpy)."""
 
     def __init__(self, params: dict[str, Any]) -> None:
         self.params = params
@@ -74,7 +78,7 @@ class SequenceGRUModel:
         self.epochs = int(params.get("epochs", 8))
         self.lr = float(params.get("lr", 0.002))
         self.scaler = StandardScaler()
-        self._torch_net: Any = None
+        self._gru_weights: dict[str, np.ndarray] | None = None
         self._fallback: LogisticRegression | None = None
 
     def fit(self, X_tr: pd.DataFrame, y_tr: np.ndarray, X_va: pd.DataFrame, y_va: np.ndarray) -> None:
@@ -116,19 +120,37 @@ class SequenceGRUModel:
                     loss.backward()
                     opt.step()
             net.eval()
-            self._torch_net = net
+            with torch.no_grad():
+                sd = net.state_dict()
+                self._gru_weights = {
+                    "w_ih": sd["gru.weight_ih_l0"].detach().cpu().numpy().astype(np.float32),
+                    "w_hh": sd["gru.weight_hh_l0"].detach().cpu().numpy().astype(np.float32),
+                    "b_ih": sd["gru.bias_ih_l0"].detach().cpu().numpy().astype(np.float32),
+                    "b_hh": sd["gru.bias_hh_l0"].detach().cpu().numpy().astype(np.float32),
+                    "head_w": sd["head.weight"].detach().cpu().numpy().astype(np.float32),
+                    "head_b": sd["head.bias"].detach().cpu().numpy().astype(np.float32),
+                }
         except ImportError:
             self._fallback = LogisticRegression(C=0.2, max_iter=300, class_weight="balanced")
             self._fallback.fit(Xs, y_tr)
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         Xs = self.scaler.transform(X.to_numpy(dtype=np.float32))
-        if self._torch_net is not None:
-            import torch
-
-            with torch.no_grad():
-                seq = torch.tensor(Xs, dtype=torch.float32).unsqueeze(1).repeat(1, 3, 1)
-                p = torch.sigmoid(self._torch_net(seq)).numpy()
+        if self._gru_weights is not None:
+            w = self._gru_weights
+            hid = w["b_ih"].shape[0] // 3
+            h = np.zeros((Xs.shape[0], hid), dtype=np.float32)
+            x_proj = Xs @ w["w_ih"].T + w["b_ih"]
+            x_r, x_z, x_n = x_proj[:, :hid], x_proj[:, hid : 2 * hid], x_proj[:, 2 * hid :]
+            for _ in range(3):
+                h_proj = h @ w["w_hh"].T + w["b_hh"]
+                h_r, h_z, h_n = h_proj[:, :hid], h_proj[:, hid : 2 * hid], h_proj[:, 2 * hid :]
+                r = _sigmoid(x_r + h_r)
+                z = _sigmoid(x_z + h_z)
+                n = np.tanh(x_n + r * h_n)
+                h = (1.0 - z) * n + z * h
+            logits = (h @ w["head_w"].T + w["head_b"]).squeeze(-1)
+            p = _sigmoid(logits).astype(np.float64)
             return np.column_stack([1.0 - p, p])
         assert self._fallback is not None
         return self._fallback.predict_proba(Xs)
