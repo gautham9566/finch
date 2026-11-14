@@ -6,7 +6,12 @@ BACKUP_DIR="${BACKUP_DIR:-/var/lib/finch/backups}"
 OUT_FILE="${BACKUP_DIR}/finch_pg_${TS}.sql.gz"
 mkdir -p "$BACKUP_DIR"
 
-PGPASSWORD="${POSTGRES_PASSWORD:-finch_pass}" pg_dump \
+PG_DUMP_BIN="/usr/lib/postgresql/16/bin/pg_dump"
+if [ ! -x "$PG_DUMP_BIN" ]; then
+  PG_DUMP_BIN="pg_dump"
+fi
+
+PGPASSWORD="${POSTGRES_PASSWORD:-finch_pass}" "$PG_DUMP_BIN" \
   -h "${POSTGRES_HOST:-postgres}" \
   -U "${POSTGRES_USER:-finch}" \
   -d "${POSTGRES_DB:-finch}" \
