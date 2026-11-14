@@ -1,0 +1,16 @@
+ARG BASE_IMAGE=finch-base:latest
+FROM ${BASE_IMAGE}
+
+ARG USE_GPU=false
+USER root
+RUN if [ "$USE_GPU" = "true" ]; then \
+      pip install --no-cache-dir torch==2.5.1; \
+    else \
+      pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.5.1+cpu; \
+    fi
+
+USER finchuser
+COPY --chown=finchuser:finchuser pipelines ./pipelines
+
+HEALTHCHECK --interval=60s --timeout=5s --retries=3 CMD python -c "import pipelines.training" || exit 1
+CMD ["python", "-m", "pipelines.training.cli", "status"]

@@ -1,0 +1,28 @@
+FROM python:3.11.10-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libgomp1 \
+      curl \
+      ca-certificates \
+      postgresql-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -g 1000 finchuser \
+    && useradd -u 1000 -g 1000 -m -s /bin/bash finchuser
+
+WORKDIR /app
+
+COPY pyproject.toml ./
+COPY libs ./libs
+COPY config ./config
+RUN mkdir -p /app/pipelines /app/web /var/lib/finch/data /var/lib/finch/backups /var/lib/finch/mlflow-artifacts \
+    && python -c "import subprocess, sys, tomllib; deps = tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']; subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', *deps])" \
+    && chown -R finchuser:finchuser /app /var/lib/finch
+
+USER finchuser
+
+HEALTHCHECK --interval=60s --timeout=5s --retries=3 CMD python -c "import libs.common" || exit 1

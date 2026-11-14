@@ -1,35 +1,151 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.4-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-finch}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
-      POSTGRES_DB: ${POSTGRES_DB:-finch_db}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-finch_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-finch}
     volumes:
       - pg_data:/var/lib/postgresql/data
+      - finch_backups:/var/lib/finch/backups
     ports:
       - "127.0.0.1:5432:5432"
-
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-finch} -d ${POSTGRES_DB:-finch}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.17.2
+    image: finch-base:latest
     restart: unless-stopped
     depends_on:
-      - postgres
-    command: >
-      mlflow server
-      --host 0.0.0.0
-      --port 5000
-      --backend-store-uri postgresql+psycopg://${POSTGRES_USER:-finch}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-finch_db}
-      --default-artifact-root gs://finch-514709-lake/mlflow
+      postgres:
+        condition: service_healthy
+    command:
+      - mlflow
+      - server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --backend-store-uri
+      - postgresql+psycopg://${POSTGRES_USER:-finch}:${POSTGRES_PASSWORD:-finch_pass}@postgres:5432/${POSTGRES_DB:-finch}
+      - --default-artifact-root
+      - /var/lib/finch/mlflow-artifacts
+    volumes:
+      - mlflow_artifacts:/var/lib/finch/mlflow-artifacts
     ports:
       - "127.0.0.1:5000:5000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  data:
+    image: finch-data:latest
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: &common_env
+      FINCH_ENV: prod
+      FINCH_PROJECT_ID: ${FINCH_PROJECT_ID:-finch-514709}
+      FINCH_VM_NAME: ${FINCH_VM_NAME:-finch-vm}
+      FINCH_VM_ZONE: ${FINCH_VM_ZONE:-asia-south1-a}
+      FINCH_GCS_BUCKET: ${FINCH_GCS_BUCKET:-finch-514709-mumbai-lake}
+      FINCH_BUDGET_INR: ${FINCH_BUDGET_INR:-12500}
+      FINCH_DATA_DIR: /var/lib/finch/data
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-finch}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-finch_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-finch}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - finch_data:/var/lib/finch/data
+    profiles: ["jobs"]
+
+  training:
+    image: finch-training:latest
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.training
+      args:
+        USE_GPU: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    environment: *common_env
+    volumes:
+      - finch_data:/var/lib/finch/data
+    profiles: ["jobs"]
+
+  sandbox:
+    image: finch-sandbox:latest
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.sandbox
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *common_env
+    volumes:
+      - finch_data:/var/lib/finch/data
+    profiles: ["jobs"]
+
+  scheduler:
+    image: finch-scheduler:latest
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.scheduler
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *common_env
+    volumes:
+      - finch_data:/var/lib/finch/data
+      - finch_backups:/var/lib/finch/backups
+
+  web:
+    image: finch-web:latest
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.web
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *common_env
+    volumes:
+      - finch_data:/var/lib/finch/data:ro
+
+  nginx:
+    image: nginx:1.27.3-alpine
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../web/frontend:/usr/share/nginx/html:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
 volumes:
   pg_data:
+  mlflow_artifacts:
+  finch_data:
+  finch_backups:

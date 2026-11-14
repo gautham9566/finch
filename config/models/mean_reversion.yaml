@@ -1,0 +1,33 @@
+name: mean_reversion
+model_type: lightgbm
+agent: mean_reversion
+is_baseline: false
+enabled: true
+features:
+  - opening_gap_pct
+  - prev_1d_return
+  - prev_5d_return
+  - dist_20d_high_pct
+  - dist_20d_low_pct
+  - prev_day_range_pct
+  - volume_ratio_20d
+  - atr_14_pct
+  - india_vix_level
+params:
+  n_estimators: 250
+  learning_rate: 0.03
+  max_depth: 3
+  num_leaves: 10
+  min_child_samples: 100
+  subsample: 0.8
+  colsample_bytree: 0.8
+  reg_alpha: 1.5
+  reg_lambda: 6.0
+  early_stopping_rounds: 25
+  random_state: 101
+walk_forward:
+  n_folds: 4
+  min_train_days: 250
+  val_days: 60
+  test_holdout_days: 90
+  purge_days: 2

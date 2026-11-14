@@ -1,0 +1,11 @@
+capital_inr: 1000000.0
+risk_per_trade_pct: 0.005
+max_position_pct: 0.10
+max_sector_pct: 0.25
+max_trades_per_day: 6
+max_daily_loss_pct: 0.02
+max_opening_gap_pct: 0.035
+entry_cutoff_ist: "11:30"
+square_off_ist: "15:15"
+min_probability: 0.52
+kill_switch: false

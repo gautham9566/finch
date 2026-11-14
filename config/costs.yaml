@@ -1,0 +1,10 @@
+currency: INR
+brokerage_pct: 0.0003
+brokerage_max_inr: 20.0
+stt_sell_pct: 0.00025
+exchange_txn_pct: 0.0000297
+sebi_turnover_pct: 0.000001
+stamp_duty_buy_pct: 0.00003
+gst_pct: 0.18
+slippage_bps: 5.0
+pessimistic_gap_slippage_mult: 1.5

@@ -1,0 +1,20 @@
+name: baseline_gap_and_go
+model_type: rule_gap_and_go
+agent: momentum
+is_baseline: true
+enabled: true
+features:
+  - opening_gap_pct
+  - prev_1d_return
+  - volume_ratio_20d
+  - atr_14_pct
+params:
+  min_gap_pct: 0.005
+  max_gap_pct: 0.030
+  min_volume_ratio: 1.15
+walk_forward:
+  n_folds: 4
+  min_train_days: 250
+  val_days: 60
+  test_holdout_days: 90
+  purge_days: 2

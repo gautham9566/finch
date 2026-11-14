@@ -1,0 +1,38 @@
+timezone: Asia/Kolkata
+jobs:
+  - name: data_premarket_0800
+    description: Pre-market global cues and news refresh (08:00 IST)
+    cron: "0 8 * * 1-5"
+    command: "python -m pipelines.data.cli premarket"
+  - name: data_premarket_0845
+    description: Pre-market refresh + 08:45 snapshot (08:45 IST)
+    cron: "45 8 * * 1-5"
+    command: "python -m pipelines.sandbox.cli snapshot --slot 08:45"
+  - name: data_news_5m
+    description: Whitelisted news and announcement polling every 5 minutes on trading days
+    cron: "*/5 9-15 * * 1-5"
+    command: "python -m pipelines.data.cli news"
+  - name: sandbox_open_0920
+    description: Freeze 09:20 pre-market snapshot and run paper trading entry simulation
+    cron: "20 9 * * 1-5"
+    command: "python -m pipelines.sandbox.cli run-today"
+  - name: sandbox_squareoff_1515
+    description: Forced square-off and daily reconciliation at close
+    cron: "15 15 * * 1-5"
+    command: "python -m pipelines.sandbox.cli square-off"
+  - name: data_eod_1615
+    description: Daily post-close NSE, global cues, flows, and quality gate
+    cron: "15 16 * * 1-5"
+    command: "python -m pipelines.data.cli eod"
+  - name: sandbox_feedback_2000
+    description: Export paper trading journal back into training dataset
+    cron: "0 20 * * 1-5"
+    command: "python -m pipelines.sandbox.cli feedback"
+  - name: postgres_backup_2300
+    description: Daily pg_dump compressed backup to GCS bucket
+    cron: "0 23 * * *"
+    command: "/bin/bash /app/infra/postgres_backup.sh"
+  - name: training_weekly_sat
+    description: Weekly walk-forward model training and ranking (off-hours Saturday)
+    cron: "0 2 * * 6"
+    command: "python -m pipelines.training.cli train-all"

@@ -1,0 +1,8 @@
+ARG BASE_IMAGE=finch-base:latest
+FROM ${BASE_IMAGE}
+
+USER finchuser
+COPY --chown=finchuser:finchuser pipelines ./pipelines
+
+HEALTHCHECK --interval=60s --timeout=5s --retries=3 CMD python -c "import pipelines.sandbox" || exit 1
+CMD ["python", "-m", "pipelines.sandbox.cli", "status"]

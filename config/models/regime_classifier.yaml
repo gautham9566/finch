@@ -1,0 +1,27 @@
+name: regime_classifier
+model_type: regime
+agent: regime
+is_baseline: false
+enabled: true
+features:
+  - india_vix_level
+  - india_vix_change_1d
+  - us_overnight_return
+  - asia_morning_return
+  - crude_usdinr_yield_composite
+  - prev_day_range_pct
+  - opening_gap_pct
+params:
+  max_depth: 3
+  n_estimators: 120
+  learning_rate: 0.04
+  min_samples_leaf: 40
+  vix_skip_threshold: 28.0
+  vix_reduce_threshold: 20.0
+  random_state: 42
+walk_forward:
+  n_folds: 4
+  min_train_days: 250
+  val_days: 60
+  test_holdout_days: 90
+  purge_days: 2

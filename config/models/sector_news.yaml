@@ -1,0 +1,32 @@
+name: sector_news
+model_type: xgboost
+agent: sector_news
+is_baseline: false
+enabled: true
+features:
+  - rel_strength_sector_5d
+  - rel_strength_nifty_5d
+  - news_sentiment_score
+  - opening_gap_pct
+  - volume_ratio_20d
+  - atr_14_pct
+  - india_vix_change_1d
+  - us_overnight_return
+  - asia_morning_return
+params:
+  n_estimators: 220
+  learning_rate: 0.03
+  max_depth: 3
+  min_child_weight: 60
+  subsample: 0.8
+  colsample_bytree: 0.85
+  reg_alpha: 1.0
+  reg_lambda: 6.0
+  early_stopping_rounds: 25
+  random_state: 202
+walk_forward:
+  n_folds: 4
+  min_train_days: 250
+  val_days: 60
+  test_holdout_days: 90
+  purge_days: 2

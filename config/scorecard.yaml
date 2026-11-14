@@ -1,0 +1,23 @@
+promotion_rules:
+  must_beat_baselines:
+    - baseline_logreg
+    - baseline_gap_and_go
+  min_net_return_pct: 0.0
+  min_profit_factor: 1.02
+  max_drawdown_pct: 0.12
+  max_calibration_ece: 0.15
+  max_train_val_auc_gap: 0.15
+  min_train_auc: 0.505
+  distillation_min_paper_days: 60
+  distillation_enabled: false
+statuses:
+  - candidate
+  - shadow
+  - champion
+  - retired
+weights:
+  net_return_pct: 0.40
+  profit_factor: 0.25
+  win_rate: 0.15
+  neg_drawdown: 0.10
+  neg_ece: 0.10

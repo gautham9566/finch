@@ -1,0 +1,9 @@
+ARG BASE_IMAGE=finch-base:latest
+FROM ${BASE_IMAGE}
+
+USER finchuser
+COPY --chown=finchuser:finchuser pipelines ./pipelines
+COPY --chown=finchuser:finchuser infra/postgres_backup.sh ./infra/postgres_backup.sh
+
+HEALTHCHECK --interval=60s --timeout=5s --retries=3 CMD python -c "import apscheduler" || exit 1
+CMD ["python", "-m", "pipelines.sandbox.scheduler"]

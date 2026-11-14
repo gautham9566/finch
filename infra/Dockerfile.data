@@ -1,0 +1,9 @@
+ARG BASE_IMAGE=finch-base:latest
+FROM ${BASE_IMAGE}
+
+USER finchuser
+COPY --chown=finchuser:finchuser pipelines/data ./pipelines/data
+COPY --chown=finchuser:finchuser pipelines/__init__.py ./pipelines/__init__.py
+
+HEALTHCHECK --interval=60s --timeout=5s --retries=3 CMD python -c "import pipelines.data" || exit 1
+CMD ["python", "-m", "pipelines.data.cli", "status"]

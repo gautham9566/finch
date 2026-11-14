@@ -1,0 +1,38 @@
+name: Finch CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check libs pipelines web tests
+      - name: Type check
+        run: mypy libs pipelines web
+      - name: Unit, leakage, parity and integration tests
+        run: pytest -q
+
+  docker-build:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build shared base and service images
+        run: |
+          docker build -f infra/Dockerfile.base -t finch-base:ci .
+          docker build -f infra/Dockerfile.data -t finch-data:ci .
+          docker build -f infra/Dockerfile.training -t finch-training:ci .
+          docker build -f infra/Dockerfile.sandbox -t finch-sandbox:ci .
+          docker build -f infra/Dockerfile.web -t finch-web:ci .
+          docker build -f infra/Dockerfile.scheduler -t finch-scheduler:ci .

@@ -1,0 +1,40 @@
+name: lgbm_picker
+model_type: lightgbm
+agent: momentum
+is_baseline: false
+enabled: true
+features:
+  - opening_gap_pct
+  - prev_1d_return
+  - prev_5d_return
+  - prev_day_range_pct
+  - volume_ratio_20d
+  - atr_14_pct
+  - dist_20d_high_pct
+  - dist_20d_low_pct
+  - rel_strength_nifty_5d
+  - rel_strength_sector_5d
+  - india_vix_level
+  - india_vix_change_1d
+  - us_overnight_return
+  - asia_morning_return
+  - crude_usdinr_yield_composite
+  - news_sentiment_score
+params:
+  n_estimators: 300
+  learning_rate: 0.03
+  max_depth: 4
+  num_leaves: 15
+  min_child_samples: 80
+  subsample: 0.8
+  colsample_bytree: 0.8
+  reg_alpha: 1.0
+  reg_lambda: 5.0
+  early_stopping_rounds: 30
+  random_state: 42
+walk_forward:
+  n_folds: 4
+  min_train_days: 250
+  val_days: 60
+  test_holdout_days: 90
+  purge_days: 2

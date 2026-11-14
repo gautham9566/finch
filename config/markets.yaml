@@ -1,0 +1,122 @@
+exchange: NSE
+timezone: Asia/Kolkata
+universe: NIFTY200
+nifty200_csv_url: https://www.niftyindices.com/IndexConstituent/ind_nifty200list.csv
+history_years: 4
+min_median_traded_value_inr: 50000000.0
+max_circuit_move_pct: 0.20
+target_atr_mult: 1.5
+stop_atr_mult: 1.0
+market_open_ist: "09:15"
+market_close_ist: "15:30"
+square_off_ist: "15:15"
+premarket_snapshots_ist:
+  - "08:45"
+  - "09:20"
+known_as_of_eod_ist: "16:00"
+known_as_of_global_ist: "08:30"
+global_cues:
+  - symbol: "^GSPC"
+    name: S&P 500
+    region: US
+  - symbol: "^IXIC"
+    name: Nasdaq Composite
+    region: US
+  - symbol: "^N225"
+    name: Nikkei 225
+    region: JP
+  - symbol: "^HSI"
+    name: Hang Seng
+    region: HK
+  - symbol: "000001.SS"
+    name: Shanghai Composite
+    region: CN
+  - symbol: "^TNX"
+    name: US 10Y Yield
+    region: US
+  - symbol: "BZ=F"
+    name: Brent Crude
+    region: GLOBAL
+  - symbol: "GC=F"
+    name: Gold
+    region: GLOBAL
+  - symbol: "INR=X"
+    name: USD/INR
+    region: IN
+  - symbol: "DX-Y.NYB"
+    name: US Dollar Index
+    region: US
+  - symbol: "^VIX"
+    name: CBOE VIX
+    region: US
+  - symbol: "^INDIAVIX"
+    name: India VIX
+    region: IN
+rss_sources:
+  - name: Economic Times Markets
+    url: https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms
+  - name: Economic Times Stocks
+    url: https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms
+  - name: Moneycontrol Markets
+    url: https://www.moneycontrol.com/rss/marketreports.xml
+nse_holidays:
+  - "2023-01-26"
+  - "2023-03-07"
+  - "2023-03-30"
+  - "2023-04-04"
+  - "2023-04-07"
+  - "2023-04-14"
+  - "2023-05-01"
+  - "2023-06-29"
+  - "2023-08-15"
+  - "2023-09-19"
+  - "2023-10-02"
+  - "2023-10-24"
+  - "2023-11-14"
+  - "2023-11-27"
+  - "2023-12-25"
+  - "2024-01-22"
+  - "2024-01-26"
+  - "2024-03-08"
+  - "2024-03-25"
+  - "2024-03-29"
+  - "2024-04-11"
+  - "2024-04-17"
+  - "2024-05-01"
+  - "2024-05-20"
+  - "2024-06-17"
+  - "2024-07-17"
+  - "2024-08-15"
+  - "2024-10-02"
+  - "2024-11-01"
+  - "2024-11-15"
+  - "2024-11-20"
+  - "2024-12-25"
+  - "2025-02-26"
+  - "2025-03-14"
+  - "2025-03-31"
+  - "2025-04-10"
+  - "2025-04-14"
+  - "2025-04-18"
+  - "2025-05-01"
+  - "2025-08-15"
+  - "2025-08-27"
+  - "2025-10-02"
+  - "2025-10-21"
+  - "2025-10-22"
+  - "2025-11-05"
+  - "2025-12-25"
+  - "2026-01-26"
+  - "2026-03-03"
+  - "2026-03-26"
+  - "2026-04-03"
+  - "2026-04-14"
+  - "2026-05-01"
+  - "2026-05-27"
+  - "2026-06-26"
+  - "2026-09-14"
+  - "2026-10-02"
+  - "2026-10-20"
+  - "2026-11-10"
+  - "2026-11-24"
+  - "2026-12-25"
