@@ -4,8 +4,7 @@ import duckdb
 
 
 def compute_cumulative_factors(splits_rows: list[tuple[str, str, float]]) -> list[tuple[str, str, float]]:
-    """Return (symbol, ex_date, factor) where bars BEFORE ex_date divide by factor."""
-    # Sort descending by ex_date per symbol so cumulative product works backward in time
+    """Return (symbol, ex_date, factor): bars BEFORE ex_date are divided by factor."""
     by_sym: dict[str, list[tuple[str, float]]] = {}
     for sym, ex_date, ratio in splits_rows:
         if ratio > 0:
@@ -21,9 +20,19 @@ def compute_cumulative_factors(splits_rows: list[tuple[str, str, float]]) -> lis
     return out
 
 
-def adjust_1min_parquet(raw_parquet: str, splits_parquet: str, out_parquet: str) -> None:
-    """Adjust unadjusted 1-min OHLCV prices & volume using DuckDB (streaming)."""
-    con = duckdb.connect()
+def adjust_1min_parquet(
+    raw_parquet: str,
+    splits_parquet: str,
+    out_dir: str,
+    con: duckdb.DuckDBPyConnection | None = None,
+) -> None:
+    """Filter bad bars and split-adjust 1-min OHLCV in one streaming pass (ASOF join).
+
+    Each bar is divided by the cumulative factor of all splits whose ex_date is
+    AFTER the bar's date; volume is multiplied by the same factor.
+    Output is Parquet partitioned by year.
+    """
+    con = con or duckdb.connect()
     con.execute(f"""
         COPY (
             WITH factors AS (
@@ -37,30 +46,30 @@ def adjust_1min_parquet(raw_parquet: str, splits_parquet: str, out_parquet: str)
                 FROM read_parquet('{splits_parquet}')
                 WHERE split_ratio > 0
             ),
-            joined AS (
+            bars AS (
                 SELECT
-                    p.symbol,
-                    p.timestamp_ist,
-                    p.open, p.high, p.low, p.close, p.volume,
-                    COALESCE((
-                        SELECT f.cum_factor
-                        FROM factors f
-                        WHERE f.symbol = p.symbol
-                          AND CAST(p.timestamp_ist AS DATE) < f.ex_date
-                        ORDER BY f.ex_date ASC
-                        LIMIT 1
-                    ), 1.0) AS adj_factor
-                FROM read_parquet('{raw_parquet}') p
+                    symbol,
+                    CAST(timestamp_ist AS TIMESTAMP) AS ts,
+                    CAST(CAST(timestamp_ist AS TIMESTAMP) AS DATE) AS bar_date,
+                    CAST(open AS DOUBLE) AS open,
+                    CAST(high AS DOUBLE) AS high,
+                    CAST(low AS DOUBLE) AS low,
+                    CAST(close AS DOUBLE) AS close,
+                    CAST(volume AS BIGINT) AS volume
+                FROM read_parquet('{raw_parquet}')
+                WHERE open > 0 AND close > 0 AND high >= low AND volume >= 0
             )
             SELECT
-                symbol,
-                timestamp_ist,
-                open / adj_factor AS open,
-                high / adj_factor AS high,
-                low / adj_factor AS low,
-                close / adj_factor AS close,
-                CAST(ROUND(volume * adj_factor) AS BIGINT) AS volume,
-                YEAR(timestamp_ist) AS year
-            FROM joined
-        ) TO '{out_parquet}' (FORMAT PARQUET, PARTITION_BY (year), OVERWRITE_OR_IGNORE 1)
+                b.symbol,
+                b.ts AS timestamp_ist,
+                b.open / COALESCE(f.cum_factor, 1.0) AS open,
+                b.high / COALESCE(f.cum_factor, 1.0) AS high,
+                b.low / COALESCE(f.cum_factor, 1.0) AS low,
+                b.close / COALESCE(f.cum_factor, 1.0) AS close,
+                CAST(ROUND(b.volume * COALESCE(f.cum_factor, 1.0)) AS BIGINT) AS volume,
+                YEAR(b.ts) AS year
+            FROM bars b
+            ASOF LEFT JOIN factors f
+                ON b.symbol = f.symbol AND b.bar_date < f.ex_date
+        ) TO '{out_dir}' (FORMAT PARQUET, PARTITION_BY (year), OVERWRITE_OR_IGNORE 1)
     """)

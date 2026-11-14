@@ -1,20 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "finch"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "duckdb>=1.1.0",
+    "pandas>=2.2.0",
     "polars>=1.12.0",
     "pyarrow>=18.0.0",
-    "google-cloud-storage>=2.18.0",
+    "requests>=2.32.0",
     "nselib>=2.4.0",
     "yfinance>=0.2.50",
-    "kaggle>=2.2.5",
-    "kagglehub>=0.3.0",
-    "psycopg[binary]>=3.2.0",
-    "mlflow>=2.17.0",
-    "pydantic-settings>=2.6.0",
 ]
 
 [project.optional-dependencies]
+train = ["mlflow>=2.17.0", "psycopg[binary]>=3.2.0", "google-cloud-storage>=2.18.0"]
 dev = ["pytest>=8.3.0", "ruff>=0.7.0"]
+
+# Code is run from the repo via PYTHONPATH; `pip install .` only installs dependencies.
+[tool.setuptools]
+packages = []
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

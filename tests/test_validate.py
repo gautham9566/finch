@@ -1,9 +1,12 @@
 """Unit tests for Phase D1/D2 validation and corporate action math."""
 
 from pathlib import Path
+
+import duckdb
 import polars as pl
+
+from src.data.corp_actions import adjust_1min_parquet, compute_cumulative_factors
 from src.data.validate_1min import validate_parquet
-from src.data.corp_actions import compute_cumulative_factors
 
 
 def test_validate_parquet(tmp_path: Path) -> None:
@@ -27,6 +30,38 @@ def test_validate_parquet(tmp_path: Path) -> None:
 
 def test_compute_cumulative_factors() -> None:
     events = [("INFY", "2018-09-04", 2.0), ("INFY", "2015-06-15", 2.0)]
-    factors = dict((dt, fac) for _, dt, fac in compute_cumulative_factors(events))
+    factors = {dt: fac for _, dt, fac in compute_cumulative_factors(events)}
     assert factors["2018-09-04"] == 2.0
     assert factors["2015-06-15"] == 4.0
+
+
+def test_adjust_1min_parquet_two_splits(tmp_path: Path) -> None:
+    raw = tmp_path / "raw.parquet"
+    splits = tmp_path / "splits.parquet"
+    out = tmp_path / "out"
+    pl.DataFrame({
+        "symbol": ["INFY", "INFY", "INFY", "TCS"],
+        "timestamp_ist": ["2015-06-12 09:15:00", "2018-09-03 09:15:00", "2018-09-04 09:15:00", "2018-09-03 09:15:00"],
+        "open": [4000.0, 1400.0, 700.0, 2000.0],
+        "high": [4000.0, 1400.0, 700.0, 2000.0],
+        "low": [4000.0, 1400.0, 700.0, 2000.0],
+        "close": [4000.0, 1400.0, 700.0, 2000.0],
+        "volume": [10, 10, 10, 10],
+    }).write_parquet(raw)
+    pl.DataFrame({
+        "symbol": ["INFY", "INFY"],
+        "ex_date": ["2015-06-15", "2018-09-04"],
+        "split_ratio": [2.0, 2.0],
+    }).write_parquet(splits)
+
+    adjust_1min_parquet(str(raw), str(splits), str(out))
+    rows = duckdb.sql(
+        f"SELECT symbol, CAST(timestamp_ist AS DATE)::VARCHAR, close, volume "
+        f"FROM read_parquet('{out}/**/*.parquet', hive_partitioning=true) ORDER BY symbol, timestamp_ist"
+    ).fetchall()
+    assert rows == [
+        ("INFY", "2015-06-12", 1000.0, 40),  # before both splits: /4
+        ("INFY", "2018-09-03", 700.0, 20),   # before 2nd split: /2
+        ("INFY", "2018-09-04", 700.0, 10),   # on/after last split: unchanged
+        ("TCS", "2018-09-03", 2000.0, 10),   # no splits: unchanged
+    ]

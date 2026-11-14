@@ -1,0 +1,98 @@
+name: Finch CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_job:
+        description: "Run a Cloud Run job after deploying"
+        type: choice
+        default: none
+        options: [none, bootstrap-etl, daily-eod]
+
+env:
+  PROJECT_ID: finch-514709
+  REGION: us-central1
+  BUCKET: finch-514709-lake
+  IMAGE: us-central1-docker.pkg.dev/finch-514709/finch/finch
+  JOBS_SA: finch-jobs@finch-514709.iam.gserviceaccount.com
+  WIF_PROVIDER: projects/481113269573/locations/global/workloadIdentityPools/github/providers/github-oidc
+  DEPLOY_SA: finch-deployer@finch-514709.iam.gserviceaccount.com
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install ".[dev]"
+      - run: ruff check src tests
+      - run: pytest -q
+
+  deploy:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build & push image
+        run: |
+          gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
+          docker build -t ${IMAGE}:${GITHUB_SHA} -t ${IMAGE}:latest .
+          docker push --all-tags ${IMAGE}
+
+      - name: Deploy job bootstrap-etl (one-time ETL, 8 vCPU / 32 GiB)
+        run: |
+          gcloud run jobs deploy bootstrap-etl \
+            --image=${IMAGE}:${GITHUB_SHA} --region=${REGION} \
+            --service-account=${JOBS_SA} \
+            --set-secrets=KAGGLE_API_TOKEN=kaggle-api-token:latest \
+            --set-env-vars=LAKE_DIR=/lake,DUCKDB_MEMORY=20GB \
+            --cpu=8 --memory=32Gi --task-timeout=6h --max-retries=0 \
+            --add-volume=name=lake,type=cloud-storage,bucket=${BUCKET} \
+            --add-volume-mount=volume=lake,mount-path=/lake \
+            --command=python --args=-m,src.jobs.bootstrap_etl
+
+      - name: Deploy job daily-eod (1 vCPU / 2 GiB)
+        run: |
+          gcloud run jobs deploy daily-eod \
+            --image=${IMAGE}:${GITHUB_SHA} --region=${REGION} \
+            --service-account=${JOBS_SA} \
+            --set-env-vars=LAKE_DIR=/lake \
+            --cpu=1 --memory=2Gi --task-timeout=30m --max-retries=1 \
+            --add-volume=name=lake,type=cloud-storage,bucket=${BUCKET} \
+            --add-volume-mount=volume=lake,mount-path=/lake \
+            --command=python --args=-m,src.jobs.daily_eod
+
+      - name: Schedule daily-eod (18:30 IST, Mon-Fri)
+        run: |
+          URI="https://run.googleapis.com/v2/projects/${PROJECT_ID}/locations/${REGION}/jobs/daily-eod:run"
+          if gcloud scheduler jobs describe finch-daily-eod --location=${REGION} >/dev/null 2>&1; then
+            gcloud scheduler jobs update http finch-daily-eod --location=${REGION} \
+              --schedule="30 18 * * 1-5" --time-zone=Asia/Kolkata --uri="${URI}" \
+              --http-method=POST --oauth-service-account-email=${JOBS_SA}
+          else
+            gcloud scheduler jobs create http finch-daily-eod --location=${REGION} \
+              --schedule="30 18 * * 1-5" --time-zone=Asia/Kolkata --uri="${URI}" \
+              --http-method=POST --oauth-service-account-email=${JOBS_SA}
+          fi
+
+      - name: Run requested job
+        if: github.event_name == 'workflow_dispatch' && inputs.run_job != 'none'
+        run: gcloud run jobs execute ${{ inputs.run_job }} --region=${REGION} --async

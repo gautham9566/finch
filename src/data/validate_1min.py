@@ -1,6 +1,7 @@
 """Validate 1-minute NSE Parquet data without loading full file into RAM."""
 
 import sys
+
 import duckdb
 
 
@@ -28,7 +29,7 @@ def validate_parquet(parquet_path: str) -> dict:
     """
     row = con.execute(query).fetchone()
     cols = ["total_rows", "n_symbols", "min_ts", "max_ts", "bad_ohlc", "zero_vol_bars", "jumps_over_25pct"]
-    return dict(zip(cols, row))
+    return dict(zip(cols, row, strict=True))
 
 
 if __name__ == "__main__":
