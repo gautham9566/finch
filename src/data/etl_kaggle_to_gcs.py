@@ -3,7 +3,6 @@
 import json
 import os
 import subprocess
-import zipfile
 from pathlib import Path
 import duckdb
 import kagglehub
@@ -11,6 +10,14 @@ import requests
 
 BUCKET = os.getenv("FINCH_BUCKET", "gs://finch-514709-lake")
 KAGGLE_DATASET = "nikhilkop/nse-750-clean-1min"
+KAGGLE_FILES = [
+    "equities_1min.parquet",
+    "indices_1min.parquet",
+    "equities_75m.parquet",
+    ".continuity_report.csv",
+    "buyhold_2018_mfe_mae.csv",
+    ".README_src.md",
+]
 LOCAL_DIR = "/tmp/finch_kaggle"
 
 
@@ -39,18 +46,22 @@ def _load_kaggle_token() -> str | None:
 
 
 def _download_via_bearer(token: str) -> str:
-    """Stream-download dataset zip using Kaggle Bearer token."""
-    zip_path = Path(LOCAL_DIR) / "dataset.zip"
-    url = f"https://www.kaggle.com/api/v1/datasets/download/{KAGGLE_DATASET}"
-    with requests.get(url, headers={"Authorization": f"Bearer {token}"}, stream=True, timeout=600) as r:
-        r.raise_for_status()
-        with open(zip_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
-                if chunk:
-                    f.write(chunk)
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(LOCAL_DIR)
-    zip_path.unlink()
+    """Stream-download dataset files individually (bypasses Kaggle zip 'awaiting compression')."""
+    headers = {"Authorization": f"Bearer {token}"}
+    for fname in KAGGLE_FILES:
+        out_path = Path(LOCAL_DIR) / fname
+        url = f"https://www.kaggle.com/api/v1/datasets/download/{KAGGLE_DATASET}/{fname}"
+        with requests.get(url, headers=headers, stream=True, timeout=600) as r:
+            r.raise_for_status()
+            expected = int(r.headers.get("Content-Length", 0))
+            if out_path.exists() and expected and out_path.stat().st_size == expected:
+                print(f"Skipping existing {fname} ({expected / 1e9:.2f} GB)")
+                continue
+            print(f"Downloading {fname} ({expected / 1e9:.2f} GB)...")
+            with open(out_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=16 * 1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
     return LOCAL_DIR
 
 
