@@ -1,0 +1,829 @@
+/* Finch Read-Only Monitoring Frontend (Compiled ES2020 from app.ts) */
+"use strict";
+
+const PAGE_TITLES = {
+  overview: "Overview",
+  data: "Data & Quality Gate",
+  models: "Models & Calibration",
+  rankings: "Rankings Ladder",
+  sandbox: "Paper Sandbox & Journal",
+  jobs: "Scheduler & Jobs",
+  "cloud-resources": "Cloud Resources",
+  "cloud-billing": "Cloud Billing",
+};
+
+const state = {
+  page: "overview",
+  sandboxModelFilter: "",
+  sandboxChampionOnly: false,
+};
+
+function esc(val) {
+  const s = val === null || val === undefined ? "" : String(val);
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function fmtInr(v) {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return "--";
+  return "INR " + Number(v).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function fmtNum(v, digits = 2) {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return "--";
+  return Number(v).toLocaleString("en-IN", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+function fmtInt(v) {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return "--";
+  return Number(v).toLocaleString("en-IN");
+}
+
+function fmtIst(iso) {
+  if (!iso || typeof iso !== "string") return "--";
+  return iso.replace("T", " ").replace("+05:30", " IST").slice(0, 23);
+}
+
+function statusPill(label, tone) {
+  const text = String(label ?? "--");
+  const lower = text.toLowerCase();
+  let cls = "pill-neutral";
+  if (tone) {
+    cls = `pill-${tone}`;
+  } else if (["champion", "ready", "healthy", "success", "active", "approve", "approved", "true", "configured"].includes(lower)) {
+    cls = "pill-good";
+  } else if (["retired", "failed", "unhealthy", "unreachable", "reject", "rejected", "false", "halted"].includes(lower)) {
+    cls = "pill-bad";
+  } else if (["shadow", "candidate", "contender", "baseline", "not_configured", "pending", "estimate"].some((w) => lower.includes(w))) {
+    cls = "pill-warn";
+  }
+  return `<span class="pill ${cls}">${esc(text)}</span>`;
+}
+
+function emptyBox(message) {
+  return `<div class="empty-state">${esc(message)}</div>`;
+}
+
+function renderLineChartSvg(points, baseline, color = "#0f4c81", unitPrefix = "INR ") {
+  if (!points.length) {
+    return emptyBox("No time-series points recorded yet.");
+  }
+  const w = 680;
+  const h = 210;
+  const padL = 68;
+  const padR = 18;
+  const padT = 18;
+  const padB = 28;
+  const vals = points.map((p) => p.value);
+  if (baseline !== undefined) vals.push(baseline);
+  let minV = Math.min(...vals);
+  let maxV = Math.max(...vals);
+  if (Math.abs(maxV - minV) < 1e-6) {
+    minV -= 1;
+    maxV += 1;
+  }
+  const innerW = w - padL - padR;
+  const innerH = h - padT - padB;
+  const xOf = (i) => (points.length === 1 ? padL + innerW / 2 : padL + (i / (points.length - 1)) * innerW);
+  const yOf = (v) => padT + innerH - ((v - minV) / (maxV - minV)) * innerH;
+
+  const pathD = points
+    .map((p, i) => `${i === 0 ? "M" : "L"}${xOf(i).toFixed(1)},${yOf(p.value).toFixed(1)}`)
+    .join(" ");
+
+  const gridLines = [0, 0.5, 1]
+    .map((t) => {
+      const v = minV + t * (maxV - minV);
+      const y = yOf(v);
+      return `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${w - padR}" y2="${y.toFixed(1)}" stroke="currentColor" stroke-opacity="0.12" />
+        <text x="${padL - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end" fill="currentColor" fill-opacity="0.65" font-size="10" font-family="monospace">${esc(unitPrefix + fmtNum(v, 0))}</text>`;
+    })
+    .join("");
+
+  const baseLineSvg =
+    baseline !== undefined
+      ? `<line x1="${padL}" y1="${yOf(baseline).toFixed(1)}" x2="${w - padR}" y2="${yOf(baseline).toFixed(1)}" stroke="#64748b" stroke-dasharray="4 3" stroke-width="1" />`
+      : "";
+
+  const dots = points
+    .map((p, i) => `<circle cx="${xOf(i).toFixed(1)}" cy="${yOf(p.value).toFixed(1)}" r="2.6" fill="${color}"><title>${esc(p.label)}: ${esc(unitPrefix + fmtNum(p.value, 2))}</title></circle>`)
+    .join("");
+
+  const firstLbl = points[0].label;
+  const lastLbl = points[points.length - 1].label;
+
+  return `<div class="chart-box"><svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Time series chart">
+    ${gridLines}
+    ${baseLineSvg}
+    <path d="${pathD}" fill="none" stroke="${color}" stroke-width="2" />
+    ${dots}
+    <text x="${padL}" y="${h - 6}" fill="currentColor" fill-opacity="0.65" font-size="10" font-family="monospace">${esc(firstLbl)}</text>
+    <text x="${w - padR}" y="${h - 6}" text-anchor="end" fill="currentColor" fill-opacity="0.65" font-size="10" font-family="monospace">${esc(lastLbl)}</text>
+  </svg></div>`;
+}
+
+function renderBarChartSvg(bars, isEstimate = false) {
+  if (!bars.length) return emptyBox("No daily series available yet.");
+  const w = 680;
+  const h = 190;
+  const padL = 56;
+  const padR = 16;
+  const padT = 18;
+  const padB = 26;
+  const maxV = Math.max(...bars.map((b) => b.value), 1);
+  const innerW = w - padL - padR;
+  const innerH = h - padT - padB;
+  const bw = Math.max(4, innerW / bars.length - 3);
+  const fill = isEstimate ? "#ca8a04" : "#0f4c81";
+
+  const rects = bars
+    .map((b, i) => {
+      const x = padL + (i / bars.length) * innerW + 1;
+      const bh = (b.value / maxV) * innerH;
+      const y = padT + innerH - bh;
+      return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" fill="${fill}" opacity="0.85" rx="1.5"><title>${esc(b.label)}: INR ${fmtNum(b.value, 2)}${isEstimate ? " (estimate)" : ""}</title></rect>`;
+    })
+    .join("");
+
+  return `<div class="chart-box"><svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Daily bar chart">
+    <line x1="${padL}" y1="${padT}" x2="${w - padR}" y2="${padT}" stroke="currentColor" stroke-opacity="0.12" />
+    <text x="${padL - 6}" y="${padT + 4}" text-anchor="end" fill="currentColor" fill-opacity="0.65" font-size="10" font-family="monospace">INR ${fmtNum(maxV, 0)}</text>
+    <line x1="${padL}" y1="${padT + innerH}" x2="${w - padR}" y2="${padT + innerH}" stroke="currentColor" stroke-opacity="0.2" />
+    ${rects}
+    <text x="${padL}" y="${h - 6}" fill="currentColor" fill-opacity="0.65" font-size="10" font-family="monospace">${esc(bars[0].label)}</text>
+    <text x="${w - padR}" y="${h - 6}" text-anchor="end" fill="currentColor" fill-opacity="0.65" font-size="10" font-family="monospace">${esc(bars[bars.length - 1].label)}</text>
+  </svg></div>`;
+}
+
+async function fetchJson(url) {
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error(`HTTP ${res.status} on ${url}`);
+  return res.json();
+}
+
+function updateTopBadges(health) {
+  const qEl = document.getElementById("status-quality");
+  const kEl = document.getElementById("status-kill");
+  const uEl = document.getElementById("last-updated");
+  if (qEl) {
+    const q = health?.latest_quality;
+    if (!q) {
+      qEl.className = "pill pill-neutral";
+      qEl.textContent = "QUALITY: NO REPORT";
+    } else if (q.tradeable) {
+      qEl.className = "pill pill-good";
+      qEl.textContent = `QUALITY: TRADEABLE (${q.trade_date})`;
+    } else {
+      qEl.className = "pill pill-bad";
+      qEl.textContent = `QUALITY: HALTED (${q.trade_date})`;
+    }
+  }
+  if (kEl) {
+    const ks = Boolean(health?.kill_switch);
+    kEl.className = `pill ${ks ? "pill-bad" : "pill-good"}`;
+    kEl.textContent = `KILL SWITCH: ${ks ? "ON" : "OFF"}`;
+  }
+  if (uEl && health?.checked_at_ist) {
+    uEl.textContent = fmtIst(health.checked_at_ist);
+  }
+}
+
+async function renderOverview() {
+  const d = await fetchJson("/api/overview");
+  updateTopBadges(d.health);
+  const champ = d.champion;
+  const kpi = d.sandbox_kpis;
+  const pnl = Number(kpi?.cumulative_net_pnl_inr ?? 0);
+  const pnlClass = pnl > 0 ? "pos" : pnl < 0 ? "neg" : "";
+
+  const curvePts = (d.champion_equity_curve || []).map((r) => ({
+    label: String(r.trade_date),
+    value: Number(r.equity_inr),
+  }));
+
+  const tradesRows = (d.recent_trades || [])
+    .map(
+      (t) => `<tr>
+      <td class="mono">${esc(t.trade_date)}</td>
+      <td class="mono"><strong>${esc(t.symbol)}</strong></td>
+      <td>${esc(t.model_name)}</td>
+      <td class="num">${fmtNum(t.probability, 3)}</td>
+      <td>${statusPill(t.risk_decision)}</td>
+      <td class="num">${fmtInt(t.quantity)}</td>
+      <td class="num">${fmtNum(t.total_cost_inr)}</td>
+      <td class="num ${Number(t.net_pnl_inr) > 0 ? "pos" : Number(t.net_pnl_inr) < 0 ? "neg" : ""}">${fmtNum(t.net_pnl_inr)}</td>
+    </tr>`
+    )
+    .join("");
+
+  const qualityRows = (d.recent_quality || [])
+    .map(
+      (q) => `<tr>
+      <td class="mono">${esc(q.trade_date)}</td>
+      <td class="num">${fmtInt(q.daily_rows)}</td>
+      <td class="num">${fmtInt(q.missing_symbols)}</td>
+      <td class="num">${fmtInt(q.bad_ohlc_rows)}</td>
+      <td>${statusPill(q.intraday_status)}</td>
+      <td>${statusPill(q.tradeable ? "TRADEABLE" : "HALTED", q.tradeable ? "good" : "bad")}</td>
+    </tr>`
+    )
+    .join("");
+
+  return `
+    <div class="kpi-grid">
+      <div class="card">
+        <div class="card-title">Active Champion</div>
+        <div class="kpi-val">${esc(champ?.model_name ?? "None yet")}</div>
+        <div class="kpi-sub">${champ ? `Test AUC ${fmtNum(champ.test_auc, 3)} · Net ${fmtNum(champ.net_return_pct)}%` : "Run training pipeline to rank models"}</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Paper Equity</div>
+        <div class="kpi-val">${fmtInr(kpi?.latest_equity_inr)}</div>
+        <div class="kpi-sub">Start ${fmtInr(kpi?.starting_capital_inr)} · ${fmtInt(kpi?.replay_days ?? 0)} days</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Cumulative Net PnL</div>
+        <div class="kpi-val ${pnlClass}">${fmtInr(pnl)}</div>
+        <div class="kpi-sub">${fmtInt(d.counts?.executed_trades ?? 0)} executed / ${fmtInt(d.counts?.total_journal_rows ?? 0)} signals</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Research Inventory</div>
+        <div class="kpi-val">${fmtInt(d.counts?.model_count ?? 0)} models</div>
+        <div class="kpi-sub">${fmtInt(d.counts?.sources_count ?? 0)} sources · ${fmtInt(d.counts?.quality_days ?? 0)} quality days</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">
+        <span>Champion Equity Curve (After Statutory Costs & Slippage)</span>
+        <span class="mono muted">${esc(curvePts.length ? curvePts[curvePts.length - 1].label : "No replay data")}</span>
+      </div>
+      ${renderLineChartSvg(curvePts, Number(kpi?.starting_capital_inr ?? 1000000))}
+    </div>
+
+    <div class="two-col">
+      <div class="card">
+        <div class="card-title">Recent Data Quality Gate</div>
+        ${
+          qualityRows
+            ? `<div class="table-wrap"><table><thead><tr><th>Date</th><th class="num">Rows</th><th class="num">Missing</th><th class="num">Bad OHLC</th><th>Intraday</th><th>Gate</th></tr></thead><tbody>${qualityRows}</tbody></table></div>`
+            : emptyBox("No data quality reports stored yet.")
+        }
+      </div>
+      <div class="card">
+        <div class="card-title">Latest Sandbox Journal Signals</div>
+        ${
+          tradesRows
+            ? `<div class="table-wrap"><table><thead><tr><th>Date</th><th>Symbol</th><th>Model</th><th class="num">Prob</th><th>Risk</th><th class="num">Qty</th><th class="num">Cost</th><th class="num">Net PnL</th></tr></thead><tbody>${tradesRows}</tbody></table></div>`
+            : emptyBox("No paper-trade signals logged yet.")
+        }
+      </div>
+    </div>
+  `;
+}
+
+async function renderData() {
+  const d = await fetchJson("/api/data");
+  const sourcesRows = (d.sources || [])
+    .map(
+      (s) => `<tr>
+      <td><strong>${esc(s.source_name)}</strong></td>
+      <td>${statusPill(s.status)}</td>
+      <td class="mono">${esc(s.coverage_start ?? "--")} -> ${esc(s.coverage_end ?? "--")}</td>
+      <td class="num">${fmtInt(s.row_count)}</td>
+      <td class="mono">${fmtIst(s.last_updated_ist)}</td>
+      <td class="muted">${esc(s.notes ?? "")}</td>
+    </tr>`
+    )
+    .join("");
+
+  const datasetRows = (d.datasets || [])
+    .map(
+      (ds) => `<tr>
+      <td class="mono"><strong>${esc(ds.version_id)}</strong></td>
+      <td class="num">${fmtInt(ds.row_count)}</td>
+      <td class="num">${fmtInt(ds.symbol_count)}</td>
+      <td class="mono">${esc(ds.min_date)} .. ${esc(ds.max_date)}</td>
+      <td class="mono">${fmtIst(ds.created_at_ist)}</td>
+    </tr>`
+    )
+    .join("");
+
+  const featureRows = (d.features || [])
+    .map((f, idx) => `<tr><td class="num">${idx + 1}</td><td class="mono">${esc(f.name)}</td><td>${esc(f.description)}</td></tr>`)
+    .join("");
+
+  const qRows = (d.quality_reports || [])
+    .map(
+      (q) => `<tr>
+      <td class="mono">${esc(q.trade_date)}</td>
+      <td class="num">${fmtInt(q.universe_count)}</td>
+      <td class="num">${fmtInt(q.daily_rows)}</td>
+      <td class="num">${fmtInt(q.missing_symbols)}</td>
+      <td class="num">${fmtInt(q.bad_ohlc_rows)}</td>
+      <td class="num">${fmtInt(q.illiquid_dropped)}</td>
+      <td>${statusPill(q.global_cues_ok ? "OK" : "MISSING", q.global_cues_ok ? "good" : "bad")}</td>
+      <td>${statusPill(q.intraday_status)}</td>
+      <td>${statusPill(q.tradeable ? "TRADEABLE" : "HALTED", q.tradeable ? "good" : "bad")}</td>
+      <td class="muted">${esc((q.reasons_json || []).join("; ") || "All checks passed")}</td>
+    </tr>`
+    )
+    .join("");
+
+  return `
+    <div class="banner">
+      Intraday Broker Feed: ${d.intraday_configured ? statusPill("configured", "good") : statusPill("intraday: not configured", "warn")}
+      — Point-in-time feature matrix always stamps <span class="mono">known_as_of &lt;= decision_ts</span>.
+    </div>
+
+    <div class="card">
+      <div class="card-title">Ingestion Sources</div>
+      ${
+        sourcesRows
+          ? `<div class="table-wrap"><table><thead><tr><th>Source</th><th>Status</th><th>Coverage</th><th class="num">Rows</th><th>Updated (IST)</th><th>Notes</th></tr></thead><tbody>${sourcesRows}</tbody></table></div>`
+          : emptyBox("No ingestion sources have reported status yet.")
+      }
+    </div>
+
+    <div class="two-col">
+      <div class="card">
+        <div class="card-title">Immutable Dataset Snapshots</div>
+        ${
+          datasetRows
+            ? `<div class="table-wrap"><table><thead><tr><th>Version</th><th class="num">Rows</th><th class="num">Symbols</th><th>Date Span</th><th>Created (IST)</th></tr></thead><tbody>${datasetRows}</tbody></table></div>`
+            : emptyBox("No feature datasets built yet.")
+        }
+      </div>
+      <div class="card">
+        <div class="card-title">Point-in-Time Feature Catalog (16 Features)</div>
+        <div class="table-wrap"><table><thead><tr><th class="num">#</th><th>Feature</th><th>Definition</th></tr></thead><tbody>${featureRows}</tbody></table></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Daily Data-Quality Gate History</div>
+      ${
+        qRows
+          ? `<div class="table-wrap"><table><thead><tr><th>Trade Date</th><th class="num">Universe</th><th class="num">Rows</th><th class="num">Missing</th><th class="num">Bad OHLC</th><th class="num">Illiquid</th><th>Global Cues</th><th>Intraday</th><th>Gate</th><th>Notes</th></tr></thead><tbody>${qRows}</tbody></table></div>`
+          : emptyBox("No quality gate reports generated yet.")
+      }
+    </div>
+  `;
+}
+
+async function renderModels() {
+  const d = await fetchJson("/api/models");
+  const models = d.models || [];
+  const rows = models
+    .map(
+      (m) => `<tr>
+      <td><strong>${esc(m.model_name)}</strong><div class="muted">${esc(m.model_type)} · ${esc(m.agent_name)}</div></td>
+      <td>${statusPill(m.promotion_status ?? m.status)}</td>
+      <td class="mono">${esc(m.dataset_version)}</td>
+      <td class="num">${fmtNum(m.train_auc, 3)}</td>
+      <td class="num">${fmtNum(m.val_auc, 3)}</td>
+      <td class="num"><strong>${fmtNum(m.test_auc, 3)}</strong></td>
+      <td class="num">${fmtNum(m.ece, 4)}</td>
+      <td class="num ${Number(m.net_return_pct) > 0 ? "pos" : Number(m.net_return_pct) < 0 ? "neg" : ""}">${fmtNum(m.net_return_pct)}%</td>
+      <td class="num">${fmtNum(m.max_drawdown_pct)}%</td>
+      <td class="num">${fmtNum(Number(m.win_rate ?? 0) * 100, 1)}%</td>
+      <td class="num">${fmtNum(m.profit_factor, 2)}</td>
+      <td>${m.overfit_flag ? statusPill("OVERFIT", "bad") : m.underfit_flag ? statusPill("UNDERFIT", "warn") : statusPill("CLEAN", "good")}</td>
+    </tr>`
+    )
+    .join("");
+
+  const regimeCards = models
+    .slice(0, 4)
+    .map((m) => {
+      const reg = m.regime_breakdown_json || {};
+      const entries = Object.entries(reg);
+      return `<div class="card">
+        <div class="card-title"><span>${esc(m.model_name)}</span>${statusPill(m.promotion_status ?? m.status)}</div>
+        ${
+          entries.length
+            ? `<table><thead><tr><th>Regime</th><th class="num">Trades</th><th class="num">Win Rate</th><th class="num">Net PnL</th></tr></thead><tbody>${entries
+                .map(
+                  ([k, v]) =>
+                    `<tr><td class="mono">${esc(k)}</td><td class="num">${fmtInt(v?.trades ?? 0)}</td><td class="num">${fmtNum(Number(v?.win_rate ?? 0) * 100, 1)}%</td><td class="num">${fmtNum(v?.net_pnl_inr ?? 0, 2)}</td></tr>`
+                )
+                .join("")}</tbody></table>`
+            : emptyBox("No regime breakdown available.")
+        }
+      </div>`;
+    })
+    .join("");
+
+  return `
+    <div class="card">
+      <div class="card-title">Registered Model Cards & Out-of-Sample Walk-Forward Metrics</div>
+      ${
+        rows
+          ? `<div class="table-wrap"><table><thead><tr><th>Model / Agent</th><th>Status</th><th>Dataset</th><th class="num">Train AUC</th><th class="num">Val AUC</th><th class="num">Test AUC</th><th class="num">ECE</th><th class="num">Net Return</th><th class="num">Max DD</th><th class="num">Win Rate</th><th class="num">Profit Factor</th><th>Fit Flag</th></tr></thead><tbody>${rows}</tbody></table></div>`
+          : emptyBox("No trained models registered yet. Configured models: " + (d.configured_models || []).length)
+      }
+    </div>
+    <div class="two-col">${regimeCards || ""}</div>
+  `;
+}
+
+async function renderRankings() {
+  const d = await fetchJson("/api/rankings");
+  const ladder = d.ladder || [];
+  const rows = ladder
+    .map(
+      (r) => `<tr>
+      <td class="num"><strong>#${fmtInt(r.rank)}</strong></td>
+      <td><strong>${esc(r.model_name)}</strong></td>
+      <td>${esc(r.agent_name ?? "--")}</td>
+      <td>${statusPill(r.promotion_status)}</td>
+      <td class="num ${Number(r.net_return_pct) > 0 ? "pos" : Number(r.net_return_pct) < 0 ? "neg" : ""}">${fmtNum(r.net_return_pct)}%</td>
+      <td class="num">${fmtNum(r.test_auc, 3)}</td>
+      <td class="num">${fmtNum(r.train_val_gap, 3)}</td>
+      <td class="num">${fmtNum(r.ece, 4)}</td>
+      <td class="num">${fmtNum(r.max_drawdown_pct)}%</td>
+      <td class="num">${fmtNum(Number(r.win_rate ?? 0) * 100, 1)}%</td>
+      <td>${r.beats_baseline ? statusPill("YES", "good") : statusPill("NO", "neutral")}</td>
+    </tr>`
+    )
+    .join("");
+
+  const bars = ladder.map((r) => ({
+    label: String(r.model_name),
+    value: Math.max(0, Number(r.net_return_pct ?? 0) + 10),
+  }));
+
+  const histRows = (d.history || [])
+    .slice(-30)
+    .reverse()
+    .map(
+      (h) => `<tr>
+      <td class="mono">${fmtIst(h.evaluated_at_ist)}</td>
+      <td class="mono">${esc(h.dataset_version)}</td>
+      <td class="num">#${fmtInt(h.rank)}</td>
+      <td><strong>${esc(h.model_name)}</strong></td>
+      <td>${statusPill(h.promotion_status)}</td>
+      <td class="num">${fmtNum(h.test_auc, 3)}</td>
+      <td class="num">${fmtNum(h.net_return_pct)}%</td>
+    </tr>`
+    )
+    .join("");
+
+  return `
+    <div class="card">
+      <div class="card-title">Model Promotion Ladder (Champion / Shadow / Candidate / Retired)</div>
+      ${
+        rows
+          ? `<div class="table-wrap"><table><thead><tr><th class="num">Rank</th><th>Model</th><th>Agent</th><th>Role</th><th class="num">Net Return</th><th class="num">Test AUC</th><th class="num">Train-Val Gap</th><th class="num">ECE</th><th class="num">Max DD</th><th class="num">Win Rate</th><th>Beats Baseline</th></tr></thead><tbody>${rows}</tbody></table></div>`
+          : emptyBox("No model scorecard rankings computed yet.")
+      }
+    </div>
+    <div class="two-col">
+      <div class="card">
+        <div class="card-title">Shifted Score Bar (+10% baseline offset)</div>
+        ${bars.length ? renderBarChartSvg(bars, false) : emptyBox("No ranked scores yet.")}
+      </div>
+      <div class="card">
+        <div class="card-title">Evaluation Rank History</div>
+        ${
+          histRows
+            ? `<div class="table-wrap"><table><thead><tr><th>Evaluated</th><th>Dataset</th><th class="num">Rank</th><th>Model</th><th>Status</th><th class="num">Test AUC</th><th class="num">Net %</th></tr></thead><tbody>${histRows}</tbody></table></div>`
+            : emptyBox("No historical ranking snapshots yet.")
+        }
+      </div>
+    </div>
+  `;
+}
+
+async function renderSandbox() {
+  const qs = new URLSearchParams({ limit: "150" });
+  if (state.sandboxModelFilter) qs.set("model_name", state.sandboxModelFilter);
+  if (state.sandboxChampionOnly) qs.set("only_champion", "true");
+  const d = await fetchJson(`/api/sandbox?${qs.toString()}`);
+
+  const totals = d.model_totals || [];
+  const modelsList = Array.from(new Set(totals.map((t) => String(t.model_name))));
+
+  const activeModel = state.sandboxModelFilter || (totals[0]?.model_name ?? "");
+  const series = (d.daily_summaries || [])
+    .filter((r) => !activeModel || r.model_name === activeModel)
+    .map((r) => ({ label: String(r.trade_date), value: Number(r.equity_inr) }));
+
+  const totalsRows = totals
+    .map(
+      (m) => `<tr>
+      <td><strong>${esc(m.model_name)}</strong></td>
+      <td class="num">${fmtInt(m.days)}</td>
+      <td class="num">${fmtInt(m.total_candidates)}</td>
+      <td class="num">${fmtInt(m.total_executed)}</td>
+      <td class="num">${fmtInt(m.total_rejected)}</td>
+      <td class="num">${fmtNum(m.total_gross_pnl_inr)}</td>
+      <td class="num">${fmtNum(m.total_cost_inr)}</td>
+      <td class="num">${fmtNum(m.total_slippage_inr)}</td>
+      <td class="num ${Number(m.total_net_pnl_inr) > 0 ? "pos" : Number(m.total_net_pnl_inr) < 0 ? "neg" : ""}">${fmtNum(m.total_net_pnl_inr)}</td>
+      <td class="num">${fmtInr(m.latest_equity_inr)}</td>
+    </tr>`
+    )
+    .join("");
+
+  const jRows = (d.journal || [])
+    .map(
+      (j) => `<tr>
+      <td class="mono">${esc(j.trade_date)}</td>
+      <td class="mono"><strong>${esc(j.symbol)}</strong></td>
+      <td>${esc(j.model_name)}${j.is_champion_trade ? ' <span class="pill pill-good">CHAMP</span>' : ""}</td>
+      <td class="num">${fmtNum(j.probability, 3)}</td>
+      <td>${statusPill(j.coordinator_decision)}</td>
+      <td>${statusPill(j.llm_decision)}</td>
+      <td>${statusPill(j.risk_decision)}</td>
+      <td class="num">${fmtInt(j.quantity)}</td>
+      <td class="num">${fmtNum(j.fill_price)}</td>
+      <td class="num">${fmtNum(j.exit_price)}</td>
+      <td><span class="mono">${esc(j.exit_reason ?? "--")}</span></td>
+      <td class="num">${fmtNum(j.total_cost_inr)}</td>
+      <td class="num ${Number(j.net_pnl_inr) > 0 ? "pos" : Number(j.net_pnl_inr) < 0 ? "neg" : ""}">${fmtNum(j.net_pnl_inr)}</td>
+      <td class="num muted">${j.counterfactual_pnl_inr !== null ? fmtNum(j.counterfactual_pnl_inr) : "--"}</td>
+    </tr>`
+    )
+    .join("");
+
+  const risk = d.risk_config || {};
+  return `
+    <div class="kpi-grid">
+      <div class="card"><div class="card-title">Paper Capital</div><div class="kpi-val">${fmtInr(risk.capital_inr)}</div><div class="kpi-sub">Max daily loss ${fmtNum(Number(risk.max_daily_loss_pct ?? 0) * 100, 1)}%</div></div>
+      <div class="card"><div class="card-title">Position & Sector Caps</div><div class="kpi-val">${fmtNum(Number(risk.max_position_pct ?? 0) * 100, 0)}% / ${fmtNum(Number(risk.max_sector_pct ?? 0) * 100, 0)}%</div><div class="kpi-sub">Risk/trade ${fmtNum(Number(risk.risk_per_trade_pct ?? 0) * 100, 2)}%</div></div>
+      <div class="card"><div class="card-title">Session Windows (IST)</div><div class="kpi-val">${esc(risk.entry_cutoff_ist)} / ${esc(risk.square_off_ist)}</div><div class="kpi-sub">Max ${fmtInt(risk.max_trades_per_day)} trades/day</div></div>
+      <div class="card"><div class="card-title">LLM Reviewer Stub</div><div class="kpi-val">APPROVE</div><div class="kpi-sub">No LLM connected in Phase 1</div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span>Sandbox Equity Curve (${esc(activeModel || "No active series")})</span></div>
+      ${renderLineChartSvg(series, Number(risk.capital_inr ?? 1000000))}
+    </div>
+
+    <div class="card">
+      <div class="card-title">Per-Model Paper Portfolio Summary</div>
+      ${
+        totalsRows
+          ? `<div class="table-wrap"><table><thead><tr><th>Model</th><th class="num">Days</th><th class="num">Candidates</th><th class="num">Executed</th><th class="num">Rejected</th><th class="num">Gross PnL</th><th class="num">Costs</th><th class="num">Slippage</th><th class="num">Net PnL</th><th class="num">Latest Equity</th></tr></thead><tbody>${totalsRows}</tbody></table></div>`
+          : emptyBox("No sandbox replay summaries recorded yet.")
+      }
+    </div>
+
+    <div class="card">
+      <div class="card-title">Full Trade & Counterfactual Decision Journal</div>
+      <div class="filter-bar">
+        <label>Model:
+          <select id="sb-model-filter">
+            <option value="">All models</option>
+            ${modelsList.map((m) => `<option value="${esc(m)}" ${m === state.sandboxModelFilter ? "selected" : ""}>${esc(m)}</option>`).join("")}
+          </select>
+        </label>
+        <label><input type="checkbox" id="sb-champ-only" ${state.sandboxChampionOnly ? "checked" : ""} /> Champion trades only</label>
+      </div>
+      ${
+        jRows
+          ? `<div class="table-wrap"><table><thead><tr><th>Date</th><th>Symbol</th><th>Model</th><th class="num">Prob</th><th>Coord</th><th>LLM</th><th>Risk</th><th class="num">Qty</th><th class="num">Fill</th><th class="num">Exit</th><th>Reason</th><th class="num">Cost</th><th class="num">Net PnL</th><th class="num">Counterfactual</th></tr></thead><tbody>${jRows}</tbody></table></div>`
+          : emptyBox("No matching journal records found.")
+      }
+    </div>
+  `;
+}
+
+async function renderJobs() {
+  const d = await fetchJson("/api/jobs");
+  const schedRows = (d.schedules || [])
+    .map(
+      (j) => `<tr>
+      <td class="mono"><strong>${esc(j.name)}</strong></td>
+      <td class="mono">${esc(j.cron)}</td>
+      <td>${esc(j.description)}</td>
+      <td class="mono muted">${esc(j.command)}</td>
+    </tr>`
+    )
+    .join("");
+
+  const runRows = (d.runs || [])
+    .map(
+      (r) => `<tr>
+      <td class="num">${fmtInt(r.id)}</td>
+      <td class="mono"><strong>${esc(r.job_name)}</strong></td>
+      <td>${statusPill(r.status)}</td>
+      <td class="mono">${fmtIst(r.started_at_ist)}</td>
+      <td class="num">${r.duration_sec !== null ? fmtNum(r.duration_sec, 1) + "s" : "--"}</td>
+      <td class="muted">${esc((r.summary || "").slice(0, 140))}</td>
+    </tr>`
+    )
+    .join("");
+
+  return `
+    <div class="card">
+      <div class="card-title"><span>Registered IST Cron Schedules</span><span class="mono muted">${esc(d.timezone)}</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Job Name</th><th>Cron (IST)</th><th>Description</th><th>Command</th></tr></thead><tbody>${schedRows}</tbody></table></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Recent Execution History</div>
+      ${
+        runRows
+          ? `<div class="table-wrap"><table><thead><tr><th class="num">ID</th><th>Job</th><th>Status</th><th>Started (IST)</th><th class="num">Duration</th><th>Summary</th></tr></thead><tbody>${runRows}</tbody></table></div>`
+          : emptyBox("No job runs logged yet in Postgres job_runs.")
+      }
+    </div>
+  `;
+}
+
+async function renderCloudResources() {
+  const d = await fetchJson("/api/cloud/resources");
+  const gcp = d.gcp || {};
+  const vm = d.vm_host || {};
+  const mon = d.cloud_monitoring || {};
+  const b = d.bucket || {};
+  const loc = d.local_storage || {};
+
+  const cpuPts = (mon.series || []).map((p) => ({
+    label: String(p.ts).slice(11, 16),
+    value: Number(p.cpu_pct),
+  }));
+
+  const svcRows = (d.services || [])
+    .map(
+      (s) => `<tr>
+      <td class="mono"><strong>${esc(s.service)}</strong></td>
+      <td>${statusPill(s.status)}</td>
+      <td class="muted">${esc(s.detail)}</td>
+    </tr>`
+    )
+    .join("");
+
+  return `
+    <div class="kpi-grid">
+      <div class="card"><div class="card-title">GCP VM Instance</div><div class="kpi-val">${esc(gcp.vm_name)}</div><div class="kpi-sub">${esc(gcp.project_id)} · ${esc(gcp.vm_zone)}</div></div>
+      <div class="card"><div class="card-title">VM CPU / Load</div><div class="kpi-val">${mon.latest_cpu_pct !== null ? fmtNum(mon.latest_cpu_pct) + "%" : "Load " + (vm.load_1m ?? "--")}</div><div class="kpi-sub">${mon.available ? "Cloud Monitoring live" : "Host load average fallback"}</div></div>
+      <div class="card"><div class="card-title">RAM & Disk Usage</div><div class="kpi-val">${vm.mem_used_pct !== null ? fmtNum(vm.mem_used_pct, 1) + "%" : "--"} / ${vm.disk_used_pct !== null ? fmtNum(vm.disk_used_pct, 1) + "%" : "--"}</div><div class="kpi-sub">${fmtNum(vm.disk_used_gb, 1)} / ${fmtNum(vm.disk_total_gb, 1)} GB disk</div></div>
+      <div class="card"><div class="card-title">GCS Lake & Postgres</div><div class="kpi-val">${fmtInt(b.object_count)} objects</div><div class="kpi-sub">GCS ${fmtNum(b.total_mb, 2)} MB · PG ${loc.postgres_mb !== null ? fmtNum(loc.postgres_mb, 2) + " MB" : "--"} · Parquet ${fmtNum(loc.parquet_mb, 2)} MB</div></div>
+    </div>
+
+    <div class="two-col">
+      <div class="card">
+        <div class="card-title">Container & Subsystem Health</div>
+        <div class="table-wrap"><table><thead><tr><th>Service</th><th>Status</th><th>Detail</th></tr></thead><tbody>${svcRows}</tbody></table></div>
+      </div>
+      <div class="card">
+        <div class="card-title"><span>VM CPU Utilization (Cloud Monitoring, Last 1h)</span><span class="pill pill-neutral">${esc(mon.source)}</span></div>
+        ${cpuPts.length ? renderLineChartSvg(cpuPts, undefined, "#0f4c81", "% ") : emptyBox("Cloud Monitoring samples not available yet.")}
+      </div>
+    </div>
+  `;
+}
+
+async function renderCloudBilling() {
+  const d = await fetchJson("/api/cloud/billing");
+  const isEst = Boolean(d.is_estimate);
+  const budgetPct = d.budget_inr > 0 ? (Number(d.mtd_total) / Number(d.budget_inr)) * 100 : 0;
+
+  const svcRows = (d.service_breakdown || [])
+    .map(
+      (s) => `<tr>
+      <td>${esc(s.service)} ${s.is_estimate ? '<span class="pill pill-warn">ESTIMATE</span>' : ""}</td>
+      <td class="num">${fmtInr(s.amount)}</td>
+      <td class="num">${s.monthly_estimate !== undefined ? fmtInr(s.monthly_estimate) : "--"}</td>
+    </tr>`
+    )
+    .join("");
+
+  const bars = (d.daily_series || []).map((p) => ({
+    label: String(p.date),
+    value: Number(p.amount),
+  }));
+
+  return `
+    <div class="banner ${isEst ? "banner-warn" : ""}">
+      <strong>Billing Feed Status:</strong> ${statusPill(d.export_status, isEst ? "warn" : "good")}
+      ${d.setup_note ? `<div class="muted" style="margin-top:4px">${esc(d.setup_note)}</div>` : ""}
+    </div>
+
+    <div class="kpi-grid">
+      <div class="card">
+        <div class="card-title">Month-to-Date Spend ${isEst ? '<span class="pill pill-warn">ESTIMATE</span>' : ""}</div>
+        <div class="kpi-val">${fmtInr(d.mtd_total)}</div>
+        <div class="kpi-sub">Source: ${esc(d.source)}</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Projected Full-Month ${isEst ? '<span class="pill pill-warn">ESTIMATE</span>' : ""}</div>
+        <div class="kpi-val">${fmtInr(d.projected_month_total)}</div>
+        <div class="kpi-sub">Based on current month run-rate</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Configured GCP Budget</div>
+        <div class="kpi-val">${fmtInr(d.budget_inr)}</div>
+        <div class="kpi-sub">Alert thresholds: ${(d.budget_thresholds || []).map((x) => `${Math.round(x * 100)}%`).join(" / ")}</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Budget Utilization ${isEst ? '<span class="pill pill-warn">ESTIMATE</span>' : ""}</div>
+        <div class="kpi-val">${fmtNum(budgetPct, 1)}%</div>
+        <div class="kpi-sub">Region: asia-south1 (Mumbai)</div>
+      </div>
+    </div>
+
+    <div class="two-col">
+      <div class="card">
+        <div class="card-title"><span>Daily Cost Breakdown</span>${isEst ? '<span class="pill pill-warn">ESTIMATE</span>' : '<span class="pill pill-good">BIGQUERY</span>'}</div>
+        ${renderBarChartSvg(bars, isEst)}
+      </div>
+      <div class="card">
+        <div class="card-title">Service Line Items</div>
+        <div class="table-wrap"><table><thead><tr><th>Service</th><th class="num">MTD Spend</th><th class="num">Est. Monthly</th></tr></thead><tbody>${svcRows}</tbody></table></div>
+      </div>
+    </div>
+  `;
+}
+
+async function loadPage(page) {
+  state.page = page;
+  const titleEl = document.getElementById("page-title");
+  if (titleEl) titleEl.textContent = PAGE_TITLES[page];
+
+  document.querySelectorAll(".nav-item").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.page === page);
+  });
+
+  const content = document.getElementById("content");
+  if (!content) return;
+  content.innerHTML = `<div class="loading-box">Loading ${esc(PAGE_TITLES[page])}...</div>`;
+
+  try {
+    let html = "";
+    switch (page) {
+      case "overview":
+        html = await renderOverview();
+        break;
+      case "data":
+        html = await renderData();
+        break;
+      case "models":
+        html = await renderModels();
+        break;
+      case "rankings":
+        html = await renderRankings();
+        break;
+      case "sandbox":
+        html = await renderSandbox();
+        break;
+      case "jobs":
+        html = await renderJobs();
+        break;
+      case "cloud-resources":
+        html = await renderCloudResources();
+        break;
+      case "cloud-billing":
+        html = await renderCloudBilling();
+        break;
+    }
+    content.innerHTML = html;
+
+    if (page === "sandbox") {
+      document.getElementById("sb-model-filter")?.addEventListener("change", (ev) => {
+        state.sandboxModelFilter = ev.target.value;
+        void loadPage("sandbox");
+      });
+      document.getElementById("sb-champ-only")?.addEventListener("change", (ev) => {
+        state.sandboxChampionOnly = ev.target.checked;
+        void loadPage("sandbox");
+      });
+    }
+  } catch (err) {
+    content.innerHTML = `<div class="banner banner-warn">Failed to load ${esc(PAGE_TITLES[page])}: ${esc(err.message)}</div>`;
+  }
+}
+
+function initTheme() {
+  const saved = localStorage.getItem("finch_theme") || "light";
+  document.documentElement.setAttribute("data-theme", saved);
+  const btn = document.getElementById("theme-btn");
+  if (btn) btn.textContent = saved === "dark" ? "Light" : "Dark";
+  btn?.addEventListener("click", () => {
+    const cur = document.documentElement.getAttribute("data-theme") || "light";
+    const next = cur === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    localStorage.setItem("finch_theme", next);
+    btn.textContent = next === "dark" ? "Light" : "Dark";
+  });
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+  initTheme();
+  document.querySelectorAll(".nav-item").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const target = btn.dataset.page;
+      if (target) void loadPage(target);
+    });
+  });
+  document.getElementById("refresh-btn")?.addEventListener("click", () => {
+    void loadPage(state.page);
+  });
+  void loadPage("overview");
+});
