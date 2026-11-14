@@ -1,7 +1,9 @@
 """Phase D1/D2: Pull Kaggle 1-min dataset, validate, adjust corporate actions, and write to GCS."""
 
+import json
 import os
 import subprocess
+from pathlib import Path
 import duckdb
 import kagglehub
 
@@ -10,8 +12,23 @@ KAGGLE_DATASET = "nikhilkop/nse-750-clean-1min"
 LOCAL_DIR = "/tmp/finch_kaggle"
 
 
+def _load_kaggle_token() -> None:
+    """Support new KAGGLE_API_TOKEN format inside kaggle.json."""
+    kaggle_json = Path.home() / ".kaggle" / "kaggle.json"
+    if not kaggle_json.exists():
+        return
+    data = json.loads(kaggle_json.read_text())
+    if "KAGGLE_API_TOKEN" in data and not os.getenv("KAGGLE_API_TOKEN"):
+        token = data["KAGGLE_API_TOKEN"]
+        os.environ["KAGGLE_API_TOKEN"] = token
+        access_token = kaggle_json.parent / "access_token"
+        access_token.write_text(token)
+        os.chmod(access_token, 0o600)
+
+
 def download_kaggle() -> str:
     """Download Kaggle dataset via kagglehub and symlink into LOCAL_DIR (zero extra disk)."""
+    _load_kaggle_token()
     os.makedirs(LOCAL_DIR, exist_ok=True)
     cached_path = kagglehub.dataset_download(KAGGLE_DATASET)
     for name in os.listdir(cached_path):
