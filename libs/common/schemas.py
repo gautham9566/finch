@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Instrument(BaseModel):
@@ -34,6 +34,8 @@ class OHLCVBar(BaseModel):
 
 
 class AgentSignal(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     model_name: str
     model_version: str
     agent_name: str

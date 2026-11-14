@@ -32,8 +32,11 @@ def _run_scheduled_command(job_name: str, command: str) -> None:
             timeout=3600,
         )
         status = "success" if proc.returncode == 0 else "failed"
-        tail = (proc.stdout + "\n" + proc.stderr).strip()[-600:]
-        summary = tail or f"exit_code={proc.returncode}"
+        stdout_tail = proc.stdout.strip()[-600:]
+        combined_tail = (proc.stdout + "\n" + proc.stderr).strip()[-600:]
+        summary = ((stdout_tail or combined_tail) if proc.returncode == 0 else combined_tail) or (
+            f"exit_code={proc.returncode}"
+        )
     except Exception as exc:  # noqa: BLE001
         status = "failed"
         summary = str(exc)

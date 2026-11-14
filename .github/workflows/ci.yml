@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build shared base and service images
         run: |
-          docker build -f infra/Dockerfile.base -t finch-base:ci .
+          docker build -f infra/Dockerfile.base -t finch-base:latest -t finch-base:ci .
           docker build -f infra/Dockerfile.data -t finch-data:ci .
           docker build -f infra/Dockerfile.training -t finch-training:ci .
           docker build -f infra/Dockerfile.sandbox -t finch-sandbox:ci .
