@@ -5,8 +5,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from google.cloud import secretmanager, storage
-
 from libs.common.config import DATA_DIR, get_gcp_settings
 from libs.common.logging import get_logger
 
@@ -15,8 +13,11 @@ log = get_logger("finch.storage")
 
 def get_secret(secret_id: str) -> str | None:
     """Read latest secret version from GCP Secret Manager; return None if unconfigured."""
+    if os.getenv("FINCH_ENV", "local") != "cloud":
+        return None
     project_id = get_gcp_settings()["project_id"]
     try:
+        from google.cloud import secretmanager
         client = secretmanager.SecretManagerServiceClient()
         name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
         response = client.access_secret_version(request={"name": name}, timeout=5.0)
@@ -29,10 +30,13 @@ def get_secret(secret_id: str) -> str | None:
 
 def upload_file_to_gcs(local_path: Path, gcs_relative_path: str) -> str | None:
     """Upload a local artifact/parquet file to the configured GCS data lake."""
+    if os.getenv("FINCH_ENV", "local") != "cloud" or os.getenv("FINCH_DISABLE_GCS_SYNC") == "1":
+        return None
     bucket_name = get_gcp_settings()["gcs_bucket"]
     if not local_path.exists():
         return None
     try:
+        from google.cloud import storage
         client = storage.Client()
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(gcs_relative_path.lstrip("/"))
@@ -60,8 +64,12 @@ def upload_dir_to_gcs(local_dir: Path, gcs_prefix: str) -> int:
 
 def get_bucket_stats() -> dict[str, int]:
     """Return total object count and bytes in the GCS bucket (or local fallback stats)."""
+    if os.getenv("FINCH_ENV", "local") != "cloud":
+        files = [p for p in DATA_DIR.rglob("*") if p.is_file()]
+        return {"object_count": len(files), "total_bytes": sum(p.stat().st_size for p in files)}
     bucket_name = get_gcp_settings()["gcs_bucket"]
     try:
+        from google.cloud import storage
         client = storage.Client()
         blobs = list(client.list_blobs(bucket_name, max_results=2000))
         return {
@@ -79,7 +87,7 @@ def get_bucket_stats() -> dict[str, int]:
 
 def sync_data_dir_to_gcs() -> int:
     """Mirror local clean/features/models/journal parquet artifacts to GCS."""
-    if os.getenv("FINCH_DISABLE_GCS_SYNC") == "1":
+    if os.getenv("FINCH_ENV", "local") != "cloud" or os.getenv("FINCH_DISABLE_GCS_SYNC") == "1":
         return 0
     total = 0
     for sub in ["raw", "clean", "features", "models", "journal"]:

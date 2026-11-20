@@ -1,6 +1,8 @@
 # Finch Documentation
 
-**Finch** is an end-to-end Indian equity (NSE Nifty 200) intraday stock-selection research and paper-trading platform deployed on Google Cloud Platform (`asia-south1`, Mumbai).
+**Finch currently runs locally.** Start with the [local research runbook](local_research.md) and the [project README](../README.md). They describe the public-data study, May 2026 cutoff, trained models, PostgreSQL container and dashboard.
+
+The sections below document the original cloud implementation. Its commands and architecture are retained as historical reference; they are not the local research execution path. The current root Makefile uses local startup, backup and research commands; older data/replay commands have a `legacy-` prefix.
 
 > **Scope & Safety:** Paper trading only. There are no broker order-placement integrations and no automated LLM trading execution in this phase (`StubLLMReviewer` returns `APPROVE`).
 

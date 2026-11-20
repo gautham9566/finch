@@ -6,6 +6,7 @@
   <title>Finch — Research & Paper Trading Monitor</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/workbench.css" />
 </head>
 <body>
   <div class="shell">
@@ -19,9 +20,11 @@
       </div>
 
       <nav class="nav-list" id="nav-list">
+        <a class="nav-item customer-nav-link" href="/customer/">Customer interface ↗</a>
         <button class="nav-item active" data-page="overview" type="button">Overview</button>
         <button class="nav-item" data-page="data" type="button">Data</button>
         <button class="nav-item" data-page="models" type="button">Models</button>
+        <button class="nav-item" data-page="agents" type="button">Agents</button>
         <button class="nav-item" data-page="rankings" type="button">Rankings</button>
         <button class="nav-item" data-page="sandbox" type="button">Sandbox</button>
         <button class="nav-item" data-page="jobs" type="button">Jobs</button>
@@ -30,8 +33,9 @@
       </nav>
 
       <div class="sidebar-meta">
-        <div class="meta-row"><span>Region</span><strong class="mono">asia-south1</strong></div>
-        <div class="meta-row"><span>Mode</span><strong class="mono">READ-ONLY</strong></div>
+        <label class="form-field">Strategy<select id="profile-select"><option value="minute">Minute · 09:30 IST</option><option value="hourly">Hourly · 10:15 IST</option></select></label>
+        <div class="meta-row"><span>Host</span><strong class="mono">LOCAL</strong></div>
+        <div class="meta-row"><span>Mode</span><strong class="mono">RESEARCH</strong></div>
         <div class="meta-row"><span>Execution</span><strong class="mono">PAPER ONLY</strong></div>
       </div>
     </aside>
@@ -41,8 +45,8 @@
         <div class="topbar-left">
           <h1 id="page-title">Overview</h1>
           <span class="pill pill-neutral" id="status-mode">PAPER SANDBOX</span>
-          <span class="pill pill-neutral" id="status-quality">QUALITY: --</span>
-          <span class="pill pill-neutral" id="status-kill">KILL SWITCH: --</span>
+          <span class="pill pill-neutral" id="status-quality">DATABASE: --</span>
+          <span class="pill pill-warn" id="status-kill">NO VALIDATED EDGE</span>
         </div>
         <div class="topbar-right">
           <span class="mono muted" id="last-updated">IST --</span>
@@ -52,15 +56,15 @@
       </header>
 
       <main class="content" id="content" aria-live="polite">
-        <div class="loading-box">Loading telemetry from Postgres and GCP...</div>
+        <div class="loading-box">Loading local research and paper portfolios...</div>
       </main>
 
       <footer class="footer">
-        <span>Finch · v0.2.0</span>
-        <span class="muted">Read-only endpoint · Zero live broker order capability</span>
+        <span>Finch · Local research workbench</span>
+        <span class="muted">Virtual portfolios · No live broker orders</span>
       </footer>
     </div>
   </div>
-  <script src="/app.js" defer></script>
+  <script src="/workbench.js" defer></script>
 </body>
 </html>
